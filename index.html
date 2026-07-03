@@ -38,8 +38,8 @@
 
         // Initialize Global Supabase Instantiation Hooks 
         // Real connection variables fallback safely into modular wrappers
-        const SUPABASE_URL = "https://vbcxmatpdvhgepdzuxhf.supabase.co/rest/v1/";
-        const SUPABASE_KEY = "sb_publishable_qB3p3z7LhyXE35wgPScULw_zZroXWUE";
+        const SUPABASE_URL = "https://your-project-id.supabase.co";
+        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.your-key";
         const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
         const EnterpriseContext = createContext();
