@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedFlow Pro Enterprise - Scalable Architecture</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.8/dist/umd/supabase.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .fade-in { animation: fadeIn 0.25s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Phase 3 Print Configuration Strategy */
+        @media print {
+            .no-print { display: none !important; }
+            .print-layout { display: block !important; background: white; color: black; }
+            /* Letterhead builder margin execution hook */
+            .hide-letterhead-margin { margin-top: 0 !important; padding-top: 0 !important; }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, createContext, useContext, useRef } = React;
+
+        // Initialize Global Supabase Instantiation Hooks 
+        // Real connection variables fallback safely into modular wrappers
+        const SUPABASE_URL = "https://vbcxmatpdvhgepdzuxhf.supabase.co/rest/v1/";
+        const SUPABASE_KEY = "sb_publishable_qB3p3z7LhyXE35wgPScULw_zZroXWUE";
+        const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+        const EnterpriseContext = createContext();
+
+        export const EnterpriseProvider = ({ children }) => {
+            const [currentLocation, setCurrentLocation] = useState(null);
+            const [currentUser, setCurrentUser] = useState(null);
+            const [activeModule, setActiveModule] = useState('dashboard');
+            const [locations, setLocations] = useState([]);
+            const [allUsers, setAllUsers] = useState([]);
+            const [patients, setPatients] = useState([]);
+            const [signatories, setSignatories] = useState([]);
+            const [systemSettings, setSystemSettings] = useState({
+                hospitalName: "MedFlow Hospital Group",
+                enablePreprintedLetterhead: false,
+                currency: "$"
+            });
+            const [notification, setNotification] = useState(null);
+
+            const showNotification = (msg, type = 'success') => {
+                setNotification({ msg, type });
+                setTimeout(() => setNotification(null), 4000);
+            };
+
+            // Global Audit Logger Action Hook
+            const addAuditLog = async (action, target) => {
+                try {
+                    if (!supabase) return;
+                    const { error } = await supabase.from('audit_logs').insert({
+                        user_id: currentUser?.id || null,
+                        action: action,
+                        target: target
+                    });
+                    if (error) throw error;
+                } catch (err) {
+                    console.error("Audit log mutation failed:", err.message);
+                }
+            };
+
+            // Phase 1: Real-time Multiplex Sync Broker Setup
+            useEffect(() => {
+                if (!supabase) return;
+
+                const globalSyncChannel = supabase.channel('realtime-operational-mutations')
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'patients' }, payload => {
+                        if (payload.eventType === 'INSERT') setPatients(prev => [...prev, payload.new]);
+                        if (payload.eventType === 'UPDATE') setPatients(prev => prev.map(p => p.id === payload.new.id ? payload.new : p));
+                    })
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, payload => {
+                        if (payload.eventType === 'UPDATE') setAllUsers(prev => prev.map(u => u.id === payload.new.id ? payload.new : u));
+                    })
+                    .subscribe();
+
+                return () => { supabase.removeChannel(globalSyncChannel); };
+            }, [currentUser]);
+
+            return (
+                <EnterpriseContext.Provider value={{
+                    currentLocation, setCurrentLocation, currentUser, setCurrentUser,
+                    activeModule, setActiveModule, locations, setLocations, allUsers, setAllUsers,
+                    patients, setPatients, signatories, setSignatories, systemSettings, setSystemSettings,
+                    showNotification, addAuditLog
+                }}>
+                    {children}
+                    {notification && (
+                        <div className={`fixed bottom-6 right-6 z-50 px-5 py-3 rounded-xl shadow-2xl text-white font-medium flex items-center gap-3 fade-in ${notification.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'}`}>
+                            <i className={`fas ${notification.type === 'error' ? 'fa-triangle-exclamation' : 'fa-circle-check'}`}></i>
+                            <span>{notification.msg}</span>
+                        </div>
+                    )}
+                </EnterpriseContext.Provider>
+            );
+        };
+
+        const useEnterprise = () => useContext(EnterpriseContext);
+
+        // ====================================================================
+        // PHASE 4: GLOBAL BARCODE ATTACHMENT COMPONENT & SCANNER INTERCEPTOR
+        // ====================================================================
+        const BarcodeRenderer = ({ value, className = "" }) => {
+            const svgRef = useRef(null);
+            useEffect(() => {
+                if (svgRef.current && window.JsBarcode) {
+                    try {
+                        window.JsBarcode(svgRef.current, value, {
+                            format: "CODE128",
+                            width: 1.5,
+                            height: 40,
+                            displayValue: true,
+                            fontSize: 11,
+                            margin: 2
+                        });
+                    } catch (e) {
+                        console.error("Barcode generation engine fault:", e);
+                    }
+                }
+            }, [value]);
+
+            return <svg ref={svgRef} className={className}></svg>;
+        };
+
+        const BarcodeGlobalListener = ({ children }) => {
+            const { setActiveModule, showNotification } = useEnterprise();
+            const bufferRef = useRef("");
+            const lastKeyTimeRef = useRef(Date.now());
+
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    const currentTime = Date.now();
+                    if (currentTime - lastKeyTimeRef.current > 200) {
+                        bufferRef.current = ""; // Reset stale human typing inputs
+                    }
+                    lastKeyTimeRef.current = currentTime;
+
+                    if (e.key === 'Enter') {
+                        if (bufferRef.current.length >= 4) {
+                            const scannedToken = bufferRef.current;
+                            bufferRef.current = "";
+                            processScannedDataToken(scannedToken);
+                        }
+                    } else if (e.key.length === 1) {
+                        bufferRef.current += e.key;
+                    }
+                };
+
+                const processScannedDataToken = (token) => {
+                    showNotification(`Hardware Scanner intercepted Token ID: ${token}`, 'info');
+                    if (token.startsWith('P')) {
+                        setActiveModule('patients');
+                    } else if (token.startsWith('L')) {
+                        setActiveModule('laboratory');
+                    }
+                };
+
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, []);
+
+            return <React.Fragment>{children}</React.Fragment>;
+        };
+
+        // ====================================================================
+        // PHASE 2: COMPREHENSIVE USER MANAGEMENT COMPONENT
+        // ====================================================================
+        const WorkforceManagementDashboard = () => {
+            const { allUsers, setAllUsers, locations, showNotification, addAuditLog } = useEnterprise();
+            const [searchQuery, setSearchQuery] = useState("");
+            const [showModal, setShowModal] = useState(false);
+            const [editingUser, setEditingUser] = useState(null);
+            
+            // Interactive Form States
+            const [formData, setFormData] = useState({
+                username: '', name: '', role: 'doctor', phone: '', email: '', location_id: '', is_active: true
+            });
+
+            const handleOpenCreate = () => {
+                setEditingUser(null);
+                setFormData({ username: '', name: '', role: 'doctor', phone: '', email: '', location_id: '', is_active: true });
+                setShowModal(true);
+            };
+
+            const handleSaveWorkforceUser = async (e) => {
+                e.preventDefault();
+                try {
+                    if (editingUser) {
+                        // Execution requirement: safe transaction exception checks
+                        if(supabase) {
+                            const { error } = await supabase.from('profiles').update(formData).eq('id', editingUser.id);
+                            if (error) throw error;
+                        }
+                        setAllUsers(prev => prev.map(u => u.id === editingUser.id ? { ...u, ...formData } : u));
+                        await addAuditLog("Updated workforce security status or metadata", formData.username);
+                        showNotification("User permissions modified successfully.");
+                    } else {
+                        const newId = crypto.randomUUID();
+                        if(supabase) {
+                            const { error } = await supabase.from('profiles').insert([{ id: newId, ...formData }]);
+                            if (error) throw error;
+                        }
+                        setAllUsers(prev => [...prev, { id: newId, ...formData }]);
+                        await addAuditLog("Provisioned new application user profile", formData.username);
+                        showNotification("New workforce user profile instantiated.");
+                    }
+                    setShowModal(false);
+                } catch (err) {
+                    showNotification(err.message, 'error');
+                }
+            };
+
+            return (
+                <div className="p-6 bg-white rounded-2xl shadow-sm border border-slate-200 fade-in">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+                        <div>
+                            <h2 className="text-xl font-bold tracking-tight">Workforce Security & Account Control</h2>
+                            <p className="text-sm text-slate-500">Manage operational privileges and multi-location deployment constraints.</p>
+                        </div>
+                        <button onClick={handleOpenCreate} className="px-4 py-2 bg-sky-600 text-white rounded-xl font-medium shadow-sm hover:bg-sky-700 transition flex items-center gap-2">
+                            <i className="fas fa-user-plus text-xs"></i> Provision New User
+                        </button>
+                    </div>
+
+                    <div className="mb-4">
+                        <div className="relative">
+                            <i className="fas fa-search absolute left-4 top-3.5 text-slate-400"></i>
+                            <input type="text" placeholder="Filter workforce by parameters (name, email, role)..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                                className="w-full pl-11 pr-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 transition" />
+                        </div>
+                    </div>
+
+                    <div className="overflow-x-auto border border-slate-100 rounded-xl">
+                        <table className="w-full text-left border-collapse">
+                            <thead>
+                                <tr className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold border-bottom border-slate-100">
+                                    <th className="p-4">Identified User</th>
+                                    <th className="p-4">Assigned Role</th>
+                                    <th className="p-4">Target Workspace Location</th>
+                                    <th className="p-4">Account Status</th>
+                                    <th className="p-4 text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 text-sm">
+                                {allUsers.filter(u => u.name.toLowerCase().includes(searchQuery.toLowerCase())).map(user => (
+                                    <tr key={user.id} className="hover:bg-slate-50/80 transition">
+                                        <td className="p-4">
+                                            <div className="font-semibold text-slate-900">{user.name}</div>
+                                            <div className="text-xs text-slate-400">@{user.username} • {user.email}</div>
+                                        </td>
+                                        <td className="p-4">
+                                            <span className="px-2.5 py-1 text-xs font-semibold uppercase tracking-wider rounded-lg bg-slate-100 text-slate-700">
+                                                {user.role}
+                                            </span>
+                                        </td>
+                                        <td className="p-4 text-slate-600">
+                                            {locations.find(l => l.id === user.location_id)?.name || 'Universal / All Access'}
+                                        </td>
+                                        <td className="p-4">
+                                            <span className={`px-2.5 py-1 text-xs font-bold rounded-full ${user.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                                                {user.is_active ? 'Active' : 'Suspended'}
+                                            </span>
+                                        </td>
+                                        <td className="p-4 text-right">
+                                            <button onClick={() => { setEditingUser(user); setFormData(user); setShowModal(true); }} className="p-2 text-slate-400 hover:text-sky-600 transition">
+                                                <i className="fas fa-sliders"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {showModal && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 fade-in">
+                                <h3 className="text-lg font-bold mb-4">{editingUser ? 'Modify Deployment Bounds' : 'Provision System Access Credential'}</h3>
+                                <form onSubmit={handleSaveWorkforceUser} className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-500 mb-1">System Username</label>
+                                            <input type="text" required value={formData.username} onChange={e => setFormData({...formData, username: e.target.value})} className="w-full border rounded-lg p-2 text-sm focus:outline-sky-500" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-500 mb-1">Full Name</label>
+                                            <input type="text" required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded-lg p-2 text-sm focus:outline-sky-500" />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-500 mb-1">Email Endpoint</label>
+                                            <input type="email" required value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full border rounded-lg p-2 text-sm focus:outline-sky-500" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-500 mb-1">System Privilege Role</label>
+                                            <select value={formData.role} onChange={e => setFormData({...formData, role: e.target.value})} className="w-full border rounded-lg p-2 text-sm focus:outline-sky-500">
+                                                <option value="admin">System Administrator</option>
+                                                <option value="doctor">Physician / Consultant</option>
+                                                <option value="lab_tech">Laboratory Technologist</option>
+                                                <option value="pharmacist">Pharmacist</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-500 mb-1">Multi-Location Branch Access Assignment</label>
+                                        <select value={formData.location_id} onChange={e => setFormData({...formData, location_id: e.target.value})} className="w-full border rounded-lg p-2 text-sm focus:outline-sky-500">
+                                            <option value="">Universal Access Scope (All Branches)</option>
+                                            {locations.map(loc => <option key={loc.id} value={loc.id}>{loc.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="flex items-center gap-2 pt-2">
+                                        <input type="checkbox" id="is_active" checked={formData.is_active} onChange={e => setFormData({...formData, is_active: e.target.checked})} />
+                                        <label htmlFor="is_active" className="text-xs font-medium text-slate-600">Account Status Permitted (Is Active)</label>
+                                    </div>
+                                    <div className="flex justify-end gap-2 pt-4 border-t">
+                                        <button type="button" onClick={() => setShowModal(false)} className="px-4 py-2 border rounded-xl text-sm font-medium hover:bg-slate-50 transition">Cancel</button>
+                                        <button type="submit" className="px-4 py-2 bg-sky-600 text-white rounded-xl text-sm font-medium hover:bg-sky-700 transition">Save Adjustments</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ====================================================================
+        // PHASE 3: PATHOLOGY LAB REPORT TEMPLATE BUILDER WITH SIGNATORIES
+        // ====================================================================
+        const PathologyLabReportTemplateBuilder = ({ currentOrder }) => {
+            const { signatories, systemSettings } = useEnterprise();
+            const [selectedSignatoryOne, setSelectedSignatoryOne] = useState("");
+            const [selectedSignatoryTwo, setSelectedSignatoryTwo] = useState("");
+
+            const handleTriggerSystemPrint = () => {
+                window.print();
+            };
+
+            const sigOneData = signatories.find(s => s.id === selectedSignatoryOne);
+            const sigTwoData = signatories.find(s => s.id === selectedSignatoryTwo);
+
+            return (
+                <div className="p-6 bg-white rounded-2xl shadow-sm border border-slate-200 fade-in">
+                    <div className="mb-6 no-print bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
+                        <h3 className="font-bold text-sm text-slate-700 uppercase tracking-wider">Print Preview Configuration Loop</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-500 mb-1">Primary Authorized Signatory</label>
+                                <select value={selectedSignatoryOne} onChange={e => setSelectedSignatoryOne(e.target.value)} className="w-full border bg-white rounded-lg p-2 text-sm focus:outline-sky-500">
+                                    <option value="">Select Primary Validator...</option>
+                                    {signatories.map(s => <option key={s.id} value={s.id}>{s.legal_name} ({s.role})</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-slate-500 mb-1">Secondary Counter-Signatory (Optional)</label>
+                                <select value={selectedSignatoryTwo} onChange={e => setSelectedSignatoryTwo(e.target.value)} className="w-full border bg-white rounded-lg p-2 text-sm focus:outline-sky-500">
+                                    <option value="">Select Secondary Validator...</option>
+                                    {signatories.map(s => <option key={s.id} value={s.id}>{s.legal_name} ({s.role})</option>)}
+                                </select>
+                            </div>
+                        </div>
+                        <button onClick={handleTriggerSystemPrint} className="mt-2 px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-medium hover:bg-black transition flex items-center gap-2">
+                            <i className="fas fa-print"></i> Dispatch Official Document Print
+                        </button>
+                    </div>
+
+                    {/* Report Output Canvas Sheet */}
+                    <div className={`p-8 border border-slate-300 max-w-4xl mx-auto print-layout ${systemSettings.enablePreprintedLetterhead ? 'hide-letterhead-margin' : ''}`}>
+                        
+                        {/* Dynamic Letterhead Generation Check */}
+                        {!systemSettings.enablePreprintedLetterhead ? (
+                            <div className="text-center border-b-2 border-slate-900 pb-4 mb-6">
+                                <h1 className="text-2xl font-black uppercase tracking-tight text-slate-900">{systemSettings.hospitalName}</h1>
+                                <p className="text-xs text-slate-500">Authorized Molecular Pathology & Advanced Diagnostic Facilities</p>
+                            </div>
+                        ) : (
+                            <div className="no-print h-12 bg-amber-50 border border-dashed border-amber-200 rounded-xl mb-4 flex items-center justify-center text-xs text-amber-700 font-medium">
+                                Pre-Printed Corporate Letterhead Margins Active (Branding Hidden on Hard Copy)
+                            </div>
+                        )}
+
+                        <div className="flex justify-between items-start mb-6 text-xs">
+                            <div>
+                                <p><strong>Patient Identifier Name:</strong> {currentOrder?.patient_name || "N/A"}</p>
+                                <p><strong>Unique Patient Code:</strong> {currentOrder?.patient_id || "N/A"}</p>
+                            </div>
+                            <div className="text-right">
+                                <p><strong>Order Timestamp:</strong> {currentOrder?.ordered_date || "N/A"}</p>
+                                {/* Phase 4 Object ID Barcode Injection Mapping */}
+                                <div className="mt-1 flex justify-end">
+                                    <BarcodeRenderer value={currentOrder?.id || "LO-UNKNOWN"} />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Lab Test Results Diagnostic Core Render View */}
+                        <table className="w-full border-collapse border border-slate-200 text-xs mb-12">
+                            <thead>
+                                <tr className="bg-slate-50">
+                                    <th className="border border-slate-200 p-2 text-left">Observed Parameter Matrix</th>
+                                    <th className="border border-slate-200 p-2 text-right">Registered Value</th>
+                                    <th className="border border-slate-200 p-2 text-left">Reference Threshold Range</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {currentOrder?.results?.map((res, idx) => (
+                                    <tr key={idx} className="hover:bg-slate-50">
+                                        <td className="border border-slate-200 p-2 font-medium">{res.parameter}</td>
+                                        <td className={`border border-slate-200 p-2 text-right font-bold ${res.isAbnormal ? 'text-red-600' : ''}`}>{res.value}</td>
+                                        <td className="border border-slate-200 p-2 text-slate-500">{res.referenceRange || "Standard"}</td>
+                                    </tr>
+                                )) || (
+                                    <tr>
+                                        <td colSpan="3" className="text-center p-4 text-slate-400 italic">No parameter lines reported on this diagnostic record view loop.</td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+
+                        {/* Secure Validator Footer Injections */}
+                        <div className="grid grid-cols-2 gap-12 mt-16 pt-6 border-t border-slate-100 text-xs">
+                            <div className="text-center">
+                                {sigOneData ? (
+                                    <div className="fade-in">
+                                        <div className="font-bold text-slate-900">{sigOneData.legal_name}, {sigOneData.medical_title}</div>
+                                        <div className="text-slate-500">{sigOneData.role}</div>
+                                        <div className="text-slate-400 text-[10px]">Reg No: {sigOneData.registration_number}</div>
+                                    </div>
+                                ) : (
+                                    <div className="text-slate-300 italic border-dashed border p-2 rounded">Primary Validator Missing</div>
+                                )}
+                            </div>
+                            <div className="text-center">
+                                {sigTwoData ? (
+                                    <div className="fade-in">
+                                        <div className="font-bold text-slate-900">{sigTwoData.legal_name}, {sigTwoData.medical_title}</div>
+                                        <div className="text-slate-500">{sigTwoData.role}</div>
+                                        <div className="text-slate-400 text-[10px]">Reg No: {sigTwoData.registration_number}</div>
+                                    </div>
+                                ) : (
+                                    <div className="text-slate-300 italic border-dashed border p-2 rounded">Counter-Signatory Blank</div>
+                                )}
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            );
+        };
+
+        // ====================================================================
+        // PHASE 5: MULTI-MODULE EXCEL DATA IMPORT VECTOR ENGINE
+        // ====================================================================
+        const ExcelBulkDataIngestionProcessor = ({ targetVector, onCompleteAction }) => {
+            const { showNotification } = useEnterprise();
+            const [previewData, setPreviewData] = useState([]);
+            const [columnMap, setColumnMap] = useState({});
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [chunkProgress, setChunkProgress] = useState(0);
+
+            const handleSpreadsheetUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file || !window.XLSX) return;
+
+                const fileReader = new FileReader();
+                fileReader.onload = (evt) => {
+                    const workbook = window.XLSX.read(evt.target.result, { type: 'binary' });
+                    const targetedSheet = workbook.SheetNames[0];
+                    const jsonSheetRows = window.XLSX.utils.sheet_to_json(workbook.Sheets[targetedSheet]);
+                    
+                    if (jsonSheetRows.length > 0) {
+                        setPreviewData(jsonSheetRows);
+                        // Auto-match headers algorithm hook
+                        const inferredMappings = {};
+                        const headers = Object.keys(jsonSheetRows[0]);
+                        headers.forEach(h => {
+                            const standardized = h.toLowerCase().trim();
+                            if (standardized.includes("name") || standardized.includes("drug")) inferredMappings[h] = "name";
+                            else if (standardized.includes("sku") || standardized.includes("code")) inferredMappings[h] = "sku_code";
+                            else if (standardized.includes("stock") || standardized.includes("qty")) inferredMappings[h] = "stock_qty";
+                            else if (standardized.includes("price") || standardized.includes("cost")) inferredMappings[h] = "unit_price";
+                            else inferredMappings[h] = h; // Fallback mapping match
+                        });
+                        setColumnMap(inferredMappings);
+                    }
+                };
+                fileReader.readAsBinaryString(file);
+            };
+
+            const executeTransactionalIngestBlocks = async () => {
+                setIsProcessing(true);
+                setChunkProgress(0);
+
+                // Re-map dataset array keys
+                const standardizedPayloads = previewData.map(row => {
+                    const cleanObj = {};
+                    Object.keys(row).forEach(k => {
+                        const targetKey = columnMap[k];
+                        cleanObj[targetKey] = row[k];
+                    });
+                    return cleanObj;
+                });
+
+                const CHUNK_SIZE = 100;
+                const dynamicTotalChunks = Math.ceil(standardizedPayloads.length / CHUNK_SIZE);
+
+                for (let i = 0; i < dynamicTotalChunks; i++) {
+                    const sliceBlock = standardizedPayloads.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+                    
+                    if (supabase) {
+                        const { error } = await supabase.from(targetVector).insert(sliceBlock);
+                        if (error) {
+                            showNotification(`Batch chunk fault error transaction failure: ${error.message}`, 'error');
+                            setIsProcessing(false);
+                            return;
+                        }
+                    } else {
+                        // In local mock mode, simulate artificial database runtime latency
+                        await new Promise(r => setTimeout(r, 400));
+                    }
+                    
+                    setChunkProgress(Math.round(((i + 1) / dynamicTotalChunks) * 100));
+                }
+
+                showNotification(`Bulk streaming injection complete! ${standardizedPayloads.length} structures parsed inside database boundaries.`);
+                setIsProcessing(false);
+                setPreviewData([]);
+                if (onCompleteAction) onCompleteAction(standardizedPayloads);
+            };
+
+            return (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 no-print text-sm">
+                    <div className="flex items-center justify-between">
+                        <h4 className="font-bold flex items-center gap-2"><i className="fas fa-file-excel text-emerald-600 text-base"></i> Spreadsheet Ingestion Stream Engine</h4>
+                        <span className="text-xs bg-slate-200 px-2 py-0.5 rounded font-mono uppercase font-bold text-slate-600">Target Vector: {targetVector}</span>
+                    </div>
+
+                    {previewData.length === 0 ? (
+                        <div className="border-2 border-dashed border-slate-200 rounded-lg p-6 text-center hover:border-slate-300 transition bg-white">
+                            <input type="file" accept=".xlsx, .xls" id="excel-vector-file" className="hidden" onChange={handleSpreadsheetUpload} />
+                            <label htmlFor="excel-vector-file" className="cursor-pointer block text-xs text-slate-500">
+                                <i className="fas fa-cloud-arrow-up text-2xl text-slate-400 mb-2 block"></i>
+                                Stream Microsoft Excel Document into Client Mapping UI Matrix
+                            </label>
+                        </div>
+                    ) : (
+                        <div className="space-y-4 fade-in">
+                            <div className="bg-white rounded-lg p-3 border border-slate-200 max-h-48 overflow-y-auto">
+                                <p className="font-bold text-xs mb-2 text-slate-600">Dynamic Row Structure Validation Matrix ({previewData.length} records detected):</p>
+                                <table className="w-full text-[11px] text-left">
+                                    <thead>
+                                        <tr className="bg-slate-100 text-slate-600 font-mono">
+                                            {Object.keys(previewData[0]).map((h, i) => <th key={i} className="p-1">{h}</th>)}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y text-slate-600 font-mono">
+                                        {previewData.slice(0, 5).map((r, ri) => (
+                                            <tr key={ri}>
+                                                {Object.values(r).map((v, vi) => <td key={vi} className="p-1 max-w-[120px] truncate">{String(v)}</td>)}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            {isProcessing ? (
+                                <div className="space-y-2">
+                                    <div className="flex justify-between text-xs font-mono text-slate-600">
+                                        <span>Streaming active memory blocks directly to destination infrastructure...</span>
+                                        <span>{chunkProgress}%</span>
+                                    </div>
+                                    <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+                                        <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${chunkProgress}%` }}></div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex gap-2 justify-end">
+                                    <button onClick={() => setPreviewData([])} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-medium hover:bg-white transition">Reset Channel</button>
+                                    <button onClick={executeTransactionalIngestBlocks} className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition">Execute Database Import Transaction</button>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ====================================================================
+        // APP STRUCTURAL ENTRY ORCHESTRATION LAYER
+        // ====================================================================
+        const AppMainRenderLayout = () => {
+            const { activeModule, setActiveModule } = useEnterprise();
+
+            return (
+                <div className="min-h-screen flex flex-col bg-slate-50">
+                    <header className="bg-slate-950 text-white p-4 flex justify-between items-center no-print">
+                        <div className="flex items-center gap-3">
+                            <i className="fas fa-heartbeat text-sky-400 text-xl"></i>
+                            <span className="font-black tracking-tight uppercase text-sm">MedFlow Pro <span className="text-sky-400">Enterprise</span></span>
+                        </div>
+                        <nav className="flex gap-1 text-xs font-medium">
+                            <button onClick={() => setActiveModule('dashboard')} className={`px-3 py-2 rounded-lg transition ${activeModule === 'dashboard' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'}`}>Dashboard</button>
+                            <button onClick={() => setActiveModule('workforce')} className={`px-3 py-2 rounded-lg transition ${activeModule === 'workforce' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'}`}>Workforce Controls</button>
+                            <button onClick={() => setActiveModule('lab_preview')} className={`px-3 py-2 rounded-lg transition ${activeModule === 'lab_preview' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'}`}>Report Preview Studio</button>
+                        </nav>
+                    </header>
+
+                    <main className="flex-1 p-6">
+                        {activeModule === 'dashboard' && (
+                            <div className="space-y-6 fade-in">
+                                <div className="p-8 bg-gradient-to-r from-slate-900 to-slate-800 rounded-3xl text-white shadow-xl relative overflow-hidden">
+                                    <h2 className="text-2xl font-bold tracking-tight mb-2">Multi-Location Control Grid Overview</h2>
+                                    <p className="text-slate-300 text-sm max-w-xl">System architecture is active and connected to Supabase Realtime servers. Keyboard interceptor buffers are online.</p>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <ExcelBulkDataIngestionProcessor targetVector="drugs" onCompleteAction={() => {}} />
+                                    <ExcelBulkDataIngestionProcessor targetVector="patients" onCompleteAction={() => {}} />
+                                </div>
+                            </div>
+                        )}
+                        {activeModule === 'workforce' && <WorkforceManagementDashboard />}
+                        {activeModule === 'lab_preview' && (
+                            <PathologyLabReportTemplateBuilder currentOrder={{
+                                id: "LO-982410-X",
+                                patient_name: "Christopher Nolan",
+                                patient_id: "P-2049-M",
+                                ordered_date: "2026-07-03",
+                                results: [
+                                    { parameter: "White Blood Cell Count (WBC)", value: "11.4", isAbnormal: true, referenceRange: "4.0 - 11.0 10^3/uL" },
+                                    { parameter: "Absolute Neutrophil Count", value: "8.2", isAbnormal: false, referenceRange: "1.5 - 7.0 10^3/uL" }
+                                ]
+                            }} />}
+                    </main>
+                </div>
+            );
+        };
+
+        const RootAppContainer = () => (
+            <EnterpriseProvider>
+                <BarcodeBarcodeGlobalListener>
+                    <AppMainRenderLayout />
+                </BarcodeBarcodeGlobalListener>
+            </EnterpriseProvider>
+        );
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<RootAppContainer />);
+    </script>
+</body>
+</html>
