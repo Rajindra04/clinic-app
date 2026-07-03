@@ -1,0 +1,2134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PolyCare — Polyclinic Management System</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#1e40af" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel for JSX transpilation (v7 - generates browser-compatible code) -->
+  <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+
+  <!-- Dexie.js for IndexedDB -->
+  <script src="https://cdn.jsdelivr.net/npm/dexie@3/dist/dexie.min.js"></script>
+
+  <!-- JsBarcode -->
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+
+  <style>
+    /* ===================== PRINT STYLES ===================== */
+    @media print {
+      body * { visibility: hidden; }
+      #print-area, #print-area * { visibility: visible; }
+      #print-area { position: absolute; left: 0; top: 0; width: 100%; }
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+
+      /* A4 layout */
+      @page { size: A4; margin: 15mm 15mm 20mm 15mm; }
+
+      .report-header-digital { display: block; }
+      .report-header-letterhead { display: none; }
+
+      body.letterhead-mode .report-header-digital { display: none; }
+      body.letterhead-mode .report-header-letterhead { display: block; }
+
+      .out-of-range { color: red !important; font-weight: bold !important; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ccc; padding: 4px 8px; font-size: 11pt; }
+    }
+
+    @media screen {
+      .print-only { display: none; }
+    }
+
+    .out-of-range { color: red; font-weight: bold; }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+
+    /* Transitions */
+    .tab-content { animation: fadeIn 0.2s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Badge pulse */
+    .badge-pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    /* Barcode label */
+    .barcode-label { width: 2in; height: 1in; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid #ccc; padding: 2px; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react,env">
+  // =====================================================================
+  //  DATABASE SCHEMA  (Dexie.js / IndexedDB)
+  // =====================================================================
+  const db = new Dexie('PolyCareDB');
+  db.version(1).stores({
+    patients:    '++id, name, phone, createdAt',
+    vitals:      '++id, patientId, recordedAt',
+    queue:       '++id, patientId, status, createdAt',
+    prescriptions: '++id, patientId, createdAt',
+    medicines:   '++id, barcode, name, batch, expiry',
+    sales:       '++id, createdAt',
+    labOrders:   '++id, patientId, barcode, status, createdAt',
+    labResults:  '++id, labOrderId, createdAt',
+    signatories: '++id, name',
+    settings:    'key',
+  });
+
+  // =====================================================================
+  //  SEED DATA — Lab Test Templates
+  // =====================================================================
+  const LAB_TEMPLATES = {
+    CBC: {
+      name: 'Complete Blood Count (CBC)',
+      parameters: [
+        { id: 'hgb',  label: 'Hemoglobin',    unit: 'g/dL',  refText: 'M: 13.5–17.5 | F: 12.0–15.5',
+          refMin: 12.0, refMax: 17.5 },
+        { id: 'wbc',  label: 'WBC Count',      unit: '/cumm', refText: '4,000–11,000',
+          refMin: 4000, refMax: 11000 },
+        { id: 'plt',  label: 'Platelet Count', unit: '/cumm', refText: '150,000–450,000',
+          refMin: 150000, refMax: 450000 },
+      ],
+    },
+    LIPID: {
+      name: 'Lipid Profile',
+      parameters: [
+        { id: 'tc',   label: 'Total Cholesterol', unit: 'mg/dL', refText: 'Desirable: <200',
+          refMax: 200 },
+        { id: 'hdl',  label: 'HDL Cholesterol',   unit: 'mg/dL', refText: 'Optimal: >40',
+          refMin: 40 },
+        { id: 'ldl',  label: 'LDL Cholesterol',   unit: 'mg/dL', refText: 'Optimal: <100',
+          refMax: 100 },
+        { id: 'trig', label: 'Triglycerides',      unit: 'mg/dL', refText: 'Normal: <150',
+          refMax: 150 },
+      ],
+    },
+    LFT: {
+      name: 'Liver Function Test (LFT)',
+      parameters: [
+        { id: 'tbil', label: 'Total Bilirubin',    unit: 'mg/dL', refText: '0.2–1.2',
+          refMin: 0.2, refMax: 1.2 },
+        { id: 'sgot', label: 'SGOT / AST',         unit: 'U/L',   refText: '5–40',
+          refMin: 5,   refMax: 40 },
+        { id: 'sgpt', label: 'SGPT / ALT',         unit: 'U/L',   refText: '7–56',
+          refMin: 7,   refMax: 56 },
+        { id: 'alp',  label: 'Alkaline Phosphatase', unit: 'U/L', refText: '44–147',
+          refMin: 44,  refMax: 147 },
+      ],
+    },
+    URINE: {
+      name: 'Urine Routine Examination',
+      parameters: [
+        { id: 'color',  label: 'Color',        unit: '',  refText: 'Pale Yellow', textBased: true },
+        { id: 'trans',  label: 'Transparency', unit: '',  refText: 'Clear',       textBased: true },
+        { id: 'sugar',  label: 'Sugar',        unit: '',  refText: 'Nil/Negative', textBased: true },
+        { id: 'prot',   label: 'Protein',      unit: '',  refText: 'Nil/Negative', textBased: true },
+      ],
+    },
+    GLUCOSE: {
+      name: 'Blood Glucose',
+      parameters: [
+        { id: 'fbs',  label: 'Fasting Blood Sugar',        unit: 'mg/dL', refText: '70–100',
+          refMin: 70, refMax: 100 },
+        { id: 'ppbs', label: 'Post-Prandial Blood Sugar',  unit: 'mg/dL', refText: '<140',
+          refMax: 140 },
+      ],
+    },
+  };
+
+  // =====================================================================
+  //  UTILITY HELPERS
+  // =====================================================================
+  const genId = () => Math.random().toString(36).substr(2, 9).toUpperCase();
+  const today = () => new Date().toISOString().slice(0, 10);
+  const now   = () => new Date().toISOString();
+  const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
+  const fmtDateTime = (iso) => iso ? new Date(iso).toLocaleString('en-IN') : '';
+
+  function isOutOfRange(param, value) {
+    if (param.textBased) return false;
+    const v = parseFloat(value);
+    if (isNaN(v)) return false;
+    if (param.refMin !== undefined && v < param.refMin) return true;
+    if (param.refMax !== undefined && v > param.refMax) return true;
+    return false;
+  }
+
+  // =====================================================================
+  //  CONTEXTS
+  // =====================================================================
+  const AuthContext = React.createContext(null);
+  const AppContext  = React.createContext(null);
+
+  // =====================================================================
+  //  BARCODE SCANNER HOOK
+  // =====================================================================
+  function useBarcodeScanner(onScan) {
+    const buffer = React.useRef('');
+    const timer  = React.useRef(null);
+    React.useEffect(() => {
+      const handleKey = (e) => {
+        if (e.key === 'Enter') {
+          const code = buffer.current.trim();
+          if (code.length > 3) onScan(code);
+          buffer.current = '';
+          clearTimeout(timer.current);
+        } else if (e.key.length === 1) {
+          buffer.current += e.key;
+          clearTimeout(timer.current);
+          timer.current = setTimeout(() => { buffer.current = ''; }, 100);
+        }
+      };
+      window.addEventListener('keydown', handleKey);
+      return () => window.removeEventListener('keydown', handleKey);
+    }, [onScan]);
+  }
+
+  // =====================================================================
+  //  PRINT HELPER
+  // =====================================================================
+  function triggerPrint(html, letterhead = false) {
+    const w = window.open('', '_blank', 'width=800,height=900');
+    w.document.write(`<!DOCTYPE html><html><head>
+      <title>Print</title>
+      <script src="https://cdn.tailwindcss.com"><\/script>
+      <style>
+        @page { size: A4; margin: 15mm; }
+        body { font-family: Arial, sans-serif; font-size: 11pt; }
+        .out-of-range { color: red; font-weight: bold; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; padding: 4px 8px; }
+        ${letterhead ? '.digital-header { display:none; }' : ''}
+      </style>
+    </head><body onload="window.print();window.close();">${html}</body></html>`);
+    w.document.close();
+  }
+
+  // =====================================================================
+  //  LOGIN SCREEN
+  // =====================================================================
+  const ROLES = [
+    { id: 'admin',      label: 'Admin',            icon: '🛡️',  color: 'bg-purple-600' },
+    { id: 'doctor',     label: 'Doctor / OPD',     icon: '🩺',  color: 'bg-blue-600' },
+    { id: 'pharmacist', label: 'Pharmacist',        icon: '💊',  color: 'bg-green-600' },
+    { id: 'pathologist',label: 'Pathologist / Lab', icon: '🔬',  color: 'bg-orange-600' },
+  ];
+
+  function LoginScreen({ onLogin }) {
+    const [pin, setPin] = React.useState('');
+    const [selectedRole, setSelectedRole] = React.useState(null);
+    const [error, setError] = React.useState('');
+
+    const handleLogin = () => {
+      if (!selectedRole) { setError('Please select a role.'); return; }
+      // Simple demo PIN: 1234 for all roles (admin can change in settings)
+      if (pin !== '1234') { setError('Incorrect PIN. Default PIN is 1234.'); return; }
+      onLogin(selectedRole);
+    };
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-900 to-indigo-800 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+          <div className="text-center mb-6">
+            <div className="text-5xl mb-2">🏥</div>
+            <h1 className="text-2xl font-bold text-blue-900">PolyCare</h1>
+            <p className="text-gray-500 text-sm">Polyclinic Management System</p>
+          </div>
+          <p className="text-sm font-semibold text-gray-600 mb-2">Select Your Role</p>
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            {ROLES.map(r => (
+              <button key={r.id}
+                onClick={() => { setSelectedRole(r.id); setError(''); }}
+                className={`p-3 rounded-xl border-2 text-left transition-all ${
+                  selectedRole === r.id
+                    ? 'border-blue-600 bg-blue-50 shadow-md'
+                    : 'border-gray-200 hover:border-blue-300'
+                }`}>
+                <div className="text-2xl">{r.icon}</div>
+                <div className="text-xs font-semibold mt-1">{r.label}</div>
+              </button>
+            ))}
+          </div>
+          <label className="text-sm font-semibold text-gray-600">PIN</label>
+          <input
+            type="password"
+            value={pin}
+            onChange={e => setPin(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleLogin()}
+            placeholder="Enter PIN (default: 1234)"
+            className="w-full border rounded-lg px-3 py-2 mt-1 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+          {error && <p className="text-red-500 text-sm mb-2">{error}</p>}
+          <button onClick={handleLogin}
+            className="w-full bg-blue-700 hover:bg-blue-800 text-white font-bold py-2 rounded-lg transition">
+            Login
+          </button>
+          <p className="text-xs text-gray-400 text-center mt-3">Default PIN: 1234</p>
+        </div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  NAVIGATION BAR
+  // =====================================================================
+  function NavBar({ role, activeTab, setActiveTab, onLogout }) {
+    const allTabs = [
+      { id: 'opd',      label: 'OPD',      icon: '🩺', roles: ['admin','doctor'] },
+      { id: 'pharmacy', label: 'Pharmacy', icon: '💊', roles: ['admin','pharmacist'] },
+      { id: 'lab',      label: 'Lab',      icon: '🔬', roles: ['admin','pathologist'] },
+      { id: 'admin',    label: 'Settings', icon: '⚙️', roles: ['admin'] },
+    ];
+    const tabs = allTabs.filter(t => t.roles.includes(role));
+
+    return (
+      <nav className="bg-blue-900 text-white shadow-lg no-print">
+        <div className="max-w-screen-xl mx-auto px-4 flex items-center justify-between h-14">
+          <div className="flex items-center gap-2">
+            <span className="text-xl">🏥</span>
+            <span className="font-bold text-lg hidden sm:block">PolyCare</span>
+          </div>
+          <div className="flex gap-1">
+            {tabs.map(t => (
+              <button key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all flex items-center gap-1 ${
+                  activeTab === t.id
+                    ? 'bg-white text-blue-900 shadow'
+                    : 'hover:bg-blue-700'
+                }`}>
+                <span>{t.icon}</span>
+                <span className="hidden sm:inline">{t.label}</span>
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs bg-blue-700 px-2 py-1 rounded-full capitalize">{role}</span>
+            <button onClick={onLogout}
+              className="text-xs bg-red-600 hover:bg-red-700 px-2 py-1 rounded-lg transition">
+              Logout
+            </button>
+          </div>
+        </div>
+      </nav>
+    );
+  }
+
+  // =====================================================================
+  //  MODAL WRAPPER
+  // =====================================================================
+  function Modal({ title, onClose, children, wide }) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4 no-print">
+        <div className={`bg-white rounded-2xl shadow-2xl w-full ${wide ? 'max-w-4xl' : 'max-w-lg'} max-h-[90vh] flex flex-col`}>
+          <div className="flex items-center justify-between px-6 py-4 border-b">
+            <h2 className="text-lg font-bold text-gray-800">{title}</h2>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+          </div>
+          <div className="overflow-y-auto flex-1 p-6">{children}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  INPUT COMPONENTS
+  // =====================================================================
+  function Input({ label, ...props }) {
+    return (
+      <div>
+        {label && <label className="block text-xs font-semibold text-gray-600 mb-1">{label}</label>}
+        <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" {...props} />
+      </div>
+    );
+  }
+
+  function Select({ label, options, ...props }) {
+    return (
+      <div>
+        {label && <label className="block text-xs font-semibold text-gray-600 mb-1">{label}</label>}
+        <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" {...props}>
+          {options.map(o => (
+            <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  function Textarea({ label, ...props }) {
+    return (
+      <div>
+        {label && <label className="block text-xs font-semibold text-gray-600 mb-1">{label}</label>}
+        <textarea className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none" rows={3} {...props} />
+      </div>
+    );
+  }
+
+  function Btn({ children, variant='primary', size='md', className='', ...props }) {
+    const base = 'inline-flex items-center gap-1.5 font-semibold rounded-lg transition-all focus:outline-none';
+    const sizes = { sm: 'px-2.5 py-1 text-xs', md: 'px-4 py-2 text-sm', lg: 'px-5 py-2.5 text-base' };
+    const variants = {
+      primary:   'bg-blue-600 hover:bg-blue-700 text-white',
+      success:   'bg-green-600 hover:bg-green-700 text-white',
+      danger:    'bg-red-500 hover:bg-red-600 text-white',
+      warning:   'bg-yellow-500 hover:bg-yellow-600 text-white',
+      secondary: 'bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300',
+      ghost:     'hover:bg-gray-100 text-gray-600',
+    };
+    return (
+      <button className={`${base} ${sizes[size]} ${variants[variant]} ${className}`} {...props}>
+        {children}
+      </button>
+    );
+  }
+
+  function Badge({ children, color='blue' }) {
+    const colors = {
+      blue:   'bg-blue-100 text-blue-800',
+      green:  'bg-green-100 text-green-800',
+      red:    'bg-red-100 text-red-800',
+      yellow: 'bg-yellow-100 text-yellow-800',
+      purple: 'bg-purple-100 text-purple-800',
+      gray:   'bg-gray-100 text-gray-700',
+      orange: 'bg-orange-100 text-orange-800',
+    };
+    return (
+      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${colors[color] || colors.gray}`}>
+        {children}
+      </span>
+    );
+  }
+
+  // =====================================================================
+  //  CARD COMPONENT
+  // =====================================================================
+  function Card({ title, children, action, className='' }) {
+    return (
+      <div className={`bg-white rounded-xl shadow-sm border border-gray-100 ${className}`}>
+        {(title || action) && (
+          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+            {title && <h3 className="font-semibold text-gray-700">{title}</h3>}
+            {action}
+          </div>
+        )}
+        <div className="p-5">{children}</div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  SECTION TABS (sub-navigation)
+  // =====================================================================
+  function SectionTabs({ tabs, active, setActive }) {
+    return (
+      <div className="flex gap-1 bg-gray-100 p-1 rounded-xl mb-4 flex-wrap no-print">
+        {tabs.map(t => (
+          <button key={t.id}
+            onClick={() => setActive(t.id)}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              active === t.id ? 'bg-white shadow text-blue-700' : 'text-gray-600 hover:text-gray-800'
+            }`}>
+            {t.icon && <span className="mr-1">{t.icon}</span>}
+            {t.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  STAT CARD
+  // =====================================================================
+  function StatCard({ label, value, icon, color='blue' }) {
+    const colors = {
+      blue:   'from-blue-500 to-blue-600',
+      green:  'from-green-500 to-green-600',
+      purple: 'from-purple-500 to-purple-600',
+      orange: 'from-orange-500 to-orange-600',
+    };
+    return (
+      <div className={`bg-gradient-to-br ${colors[color]} text-white rounded-xl p-4 shadow`}>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs opacity-80">{label}</p>
+            <p className="text-2xl font-bold mt-1">{value}</p>
+          </div>
+          <div className="text-3xl opacity-80">{icon}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  OPD MODULE
+  // =====================================================================
+  function OPDModule() {
+    const [subTab, setSubTab] = React.useState('queue');
+    const [patients, setPatients] = React.useState([]);
+    const [queue, setQueue]       = React.useState([]);
+    const [vitals, setVitals]     = React.useState([]);
+    const [prescriptions, setPrescriptions] = React.useState([]);
+    const [showPatientForm, setShowPatientForm] = React.useState(false);
+    const [showVitalsForm, setShowVitalsForm]   = React.useState(null);
+    const [showRxForm, setShowRxForm]           = React.useState(null);
+    const [viewRx, setViewRx]                   = React.useState(null);
+    const [search, setSearch] = React.useState('');
+
+    React.useEffect(() => {
+      db.patients.toArray().then(setPatients);
+      db.queue.toArray().then(setQueue);
+      db.vitals.toArray().then(setVitals);
+      db.prescriptions.toArray().then(setPrescriptions);
+    }, []);
+
+    const reload = async () => {
+      setPatients(await db.patients.toArray());
+      setQueue(await db.queue.toArray());
+      setVitals(await db.vitals.toArray());
+      setPrescriptions(await db.prescriptions.toArray());
+    };
+
+    const filteredPatients = patients.filter(p =>
+      p.name?.toLowerCase().includes(search.toLowerCase()) ||
+      p.phone?.includes(search) ||
+      String(p.id).includes(search)
+    );
+
+    const todayQueue = queue.filter(q => q.createdAt?.startsWith(today()));
+
+    const queueGroups = {
+      waiting:       todayQueue.filter(q => q.status === 'waiting'),
+      'in-consult':  todayQueue.filter(q => q.status === 'in-consult'),
+      completed:     todayQueue.filter(q => q.status === 'completed'),
+    };
+
+    const addToQueue = async (patient) => {
+      const existing = todayQueue.find(q => q.patientId === patient.id && q.status !== 'completed');
+      if (existing) { alert('Patient already in today\'s queue.'); return; }
+      const id = await db.queue.add({ patientId: patient.id, status: 'waiting', createdAt: now() });
+      reload();
+    };
+
+    const updateQueueStatus = async (qId, status) => {
+      await db.queue.update(qId, { status });
+      reload();
+    };
+
+    const patientName = (pid) => patients.find(p => p.id === pid)?.name || 'Unknown';
+    const patientInfo = (pid) => patients.find(p => p.id === pid);
+
+    const tabs = [
+      { id: 'queue',    label: 'Patient Queue',    icon: '📋' },
+      { id: 'patients', label: 'Patient Database', icon: '👥' },
+      { id: 'vitals',   label: 'Vitals Log',       icon: '📊' },
+      { id: 'rx',       label: 'Prescriptions',    icon: '📝' },
+    ];
+
+    return (
+      <div className="tab-content">
+        <SectionTabs tabs={tabs} active={subTab} setActive={setSubTab} />
+
+        {/* QUEUE */}
+        {subTab === 'queue' && (
+          <div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <StatCard label="Waiting" value={queueGroups.waiting.length} icon="⏳" color="orange" />
+              <StatCard label="In Consultation" value={queueGroups['in-consult'].length} icon="🩺" color="blue" />
+              <StatCard label="Completed Today" value={queueGroups.completed.length} icon="✅" color="green" />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                { key: 'waiting',     label: 'Waiting',          color: 'yellow', nextStatus: 'in-consult', nextLabel: 'Call In' },
+                { key: 'in-consult',  label: 'In Consultation',  color: 'blue',   nextStatus: 'completed',  nextLabel: 'Complete' },
+                { key: 'completed',   label: 'Completed',        color: 'green',  nextStatus: null },
+              ].map(col => (
+                <Card key={col.key} title={
+                  <span className="flex items-center gap-2">
+                    <Badge color={col.color}>{col.label}</Badge>
+                    <span className="text-gray-400 text-xs">({queueGroups[col.key].length})</span>
+                  </span>
+                }>
+                  <div className="space-y-2 min-h-16">
+                    {queueGroups[col.key].length === 0 && (
+                      <p className="text-gray-400 text-sm text-center py-4">Empty</p>
+                    )}
+                    {queueGroups[col.key].map(q => {
+                      const p = patientInfo(q.patientId);
+                      return (
+                        <div key={q.id} className="bg-gray-50 rounded-lg p-3 border border-gray-100">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <p className="font-semibold text-sm">{p?.name}</p>
+                              <p className="text-xs text-gray-500">#{p?.id} · {p?.age}y · {p?.gender}</p>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              {col.nextStatus && (
+                                <Btn size="sm" variant="primary" onClick={() => updateQueueStatus(q.id, col.nextStatus)}>
+                                  {col.nextLabel}
+                                </Btn>
+                              )}
+                              {col.key === 'in-consult' && (
+                                <Btn size="sm" variant="secondary" onClick={() => setShowRxForm(p)}>
+                                  Rx
+                                </Btn>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* PATIENTS */}
+        {subTab === 'patients' && (
+          <div>
+            <div className="flex gap-3 mb-4 flex-wrap">
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search by name, phone, or ID..."
+                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 min-w-48"
+              />
+              <Btn variant="primary" onClick={() => setShowPatientForm(true)}>+ New Patient</Btn>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">ID</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Name</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Age/Gender</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Phone</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Blood Group</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Registered</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPatients.length === 0 && (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">No patients found.</td></tr>
+                  )}
+                  {filteredPatients.map(p => (
+                    <tr key={p.id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono text-xs">P{String(p.id).padStart(4,'0')}</td>
+                      <td className="px-3 py-2 font-medium">{p.name}</td>
+                      <td className="px-3 py-2">{p.age}y / {p.gender}</td>
+                      <td className="px-3 py-2">{p.phone}</td>
+                      <td className="px-3 py-2"><Badge color="red">{p.bloodGroup || '—'}</Badge></td>
+                      <td className="px-3 py-2 text-gray-500">{fmtDate(p.createdAt)}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex gap-1">
+                          <Btn size="sm" variant="secondary" onClick={() => addToQueue(p)}>Queue</Btn>
+                          <Btn size="sm" variant="secondary" onClick={() => setShowVitalsForm(p)}>Vitals</Btn>
+                          <Btn size="sm" variant="secondary" onClick={() => setShowRxForm(p)}>Rx</Btn>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* VITALS */}
+        {subTab === 'vitals' && (
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">Patient</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Weight</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Height</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">BP</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Pulse</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Temp</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">SpO2</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Recorded</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vitals.length === 0 && (
+                    <tr><td colSpan={8} className="text-center py-8 text-gray-400">No vitals recorded.</td></tr>
+                  )}
+                  {[...vitals].reverse().map(v => (
+                    <tr key={v.id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 font-medium">{patientName(v.patientId)}</td>
+                      <td className="px-3 py-2">{v.weight} kg</td>
+                      <td className="px-3 py-2">{v.height} cm</td>
+                      <td className="px-3 py-2">{v.bp}</td>
+                      <td className="px-3 py-2">{v.pulse} bpm</td>
+                      <td className="px-3 py-2">{v.temp} °F</td>
+                      <td className="px-3 py-2">{v.spo2}%</td>
+                      <td className="px-3 py-2 text-gray-500 text-xs">{fmtDateTime(v.recordedAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* PRESCRIPTIONS */}
+        {subTab === 'rx' && (
+          <div>
+            <div className="space-y-3">
+              {prescriptions.length === 0 && (
+                <p className="text-center py-8 text-gray-400">No prescriptions yet.</p>
+              )}
+              {[...prescriptions].reverse().map(rx => (
+                <Card key={rx.id}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-semibold">{patientName(rx.patientId)}</span>
+                        <Badge color="blue">{fmtDate(rx.createdAt)}</Badge>
+                      </div>
+                      <p className="text-sm text-gray-600"><span className="font-medium">CC:</span> {rx.chiefComplaint}</p>
+                      <p className="text-sm text-gray-600"><span className="font-medium">Dx:</span> {rx.diagnosis}</p>
+                      {rx.advice && <p className="text-sm text-gray-600"><span className="font-medium">Advice:</span> {rx.advice}</p>}
+                      {rx.medicines?.length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-xs font-semibold text-gray-500 mb-1">Medicines:</p>
+                          <div className="space-y-1">
+                            {rx.medicines.map((m, i) => (
+                              <div key={i} className="text-xs bg-blue-50 rounded px-2 py-1">
+                                {m.name} — {m.dosage} | {m.timing} | {m.duration}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <Btn size="sm" variant="secondary" onClick={() => setViewRx(rx)}>Print</Btn>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* MODALS */}
+        {showPatientForm && (
+          <PatientForm onClose={() => setShowPatientForm(false)} onSave={reload} />
+        )}
+        {showVitalsForm && (
+          <VitalsForm patient={showVitalsForm} onClose={() => setShowVitalsForm(null)} onSave={reload} />
+        )}
+        {showRxForm && (
+          <PrescriptionForm patient={showRxForm} onClose={() => setShowRxForm(null)} onSave={reload} />
+        )}
+        {viewRx && (
+          <RxPrintModal rx={viewRx} patient={patientInfo(viewRx.patientId)} onClose={() => setViewRx(null)} />
+        )}
+      </div>
+    );
+  }
+
+  // Patient Form
+  function PatientForm({ onClose, onSave }) {
+    const [form, setForm] = React.useState({
+      name: '', age: '', gender: 'Male', phone: '', address: '', bloodGroup: '', createdAt: now()
+    });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const save = async () => {
+      if (!form.name || !form.age || !form.phone) { alert('Name, age, and phone are required.'); return; }
+      await db.patients.add(form);
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title="Register New Patient" onClose={onClose}>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2"><Input label="Full Name *" value={form.name} onChange={e => set('name', e.target.value)} /></div>
+          <Input label="Age *" type="number" value={form.age} onChange={e => set('age', e.target.value)} />
+          <Select label="Gender" value={form.gender} onChange={e => set('gender', e.target.value)}
+            options={['Male','Female','Other']} />
+          <Input label="Phone *" value={form.phone} onChange={e => set('phone', e.target.value)} />
+          <Select label="Blood Group" value={form.bloodGroup} onChange={e => set('bloodGroup', e.target.value)}
+            options={['','A+','A-','B+','B-','AB+','AB-','O+','O-']} />
+          <div className="col-span-2"><Textarea label="Address" value={form.address} onChange={e => set('address', e.target.value)} /></div>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" onClick={save}>Register Patient</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Vitals Form
+  function VitalsForm({ patient, onClose, onSave }) {
+    const [form, setForm] = React.useState({ weight:'', height:'', bp:'', pulse:'', temp:'', spo2:'' });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const save = async () => {
+      await db.vitals.add({ ...form, patientId: patient.id, recordedAt: now() });
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title={`Vitals — ${patient.name}`} onClose={onClose}>
+        <div className="grid grid-cols-2 gap-4">
+          <Input label="Weight (kg)" type="number" value={form.weight} onChange={e => set('weight', e.target.value)} />
+          <Input label="Height (cm)" type="number" value={form.height} onChange={e => set('height', e.target.value)} />
+          <Input label="Blood Pressure (e.g. 120/80)" value={form.bp} onChange={e => set('bp', e.target.value)} />
+          <Input label="Pulse (bpm)" type="number" value={form.pulse} onChange={e => set('pulse', e.target.value)} />
+          <Input label="Temperature (°F)" type="number" step="0.1" value={form.temp} onChange={e => set('temp', e.target.value)} />
+          <Input label="SpO2 (%)" type="number" value={form.spo2} onChange={e => set('spo2', e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="success" onClick={save}>Save Vitals</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Prescription Form
+  function PrescriptionForm({ patient, onClose, onSave }) {
+    const [form, setForm] = React.useState({
+      chiefComplaint: '', diagnosis: '', advice: '',
+      medicines: [{ name:'', dosage:'', timing:'', duration:'' }],
+      sendToPharmacy: false, sendToLab: false, labTest: 'CBC',
+    });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const updateMed = (i, k, v) => {
+      const meds = [...form.medicines];
+      meds[i] = { ...meds[i], [k]: v };
+      setForm(f => ({ ...f, medicines: meds }));
+    };
+    const addMed    = () => setForm(f => ({ ...f, medicines: [...f.medicines, { name:'', dosage:'', timing:'', duration:'' }] }));
+    const removeMed = (i) => setForm(f => ({ ...f, medicines: f.medicines.filter((_,j) => j !== i) }));
+
+    const save = async () => {
+      if (!form.chiefComplaint || !form.diagnosis) { alert('Chief complaint and diagnosis are required.'); return; }
+      const rxId = await db.prescriptions.add({
+        patientId: patient.id, createdAt: now(),
+        chiefComplaint: form.chiefComplaint, diagnosis: form.diagnosis,
+        advice: form.advice, medicines: form.medicines,
+      });
+      if (form.sendToLab) {
+        const barcode = 'LAB' + genId();
+        await db.labOrders.add({
+          patientId: patient.id, testType: form.labTest,
+          barcode, status: 'pending', createdAt: now(), rxId,
+        });
+      }
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title={`Prescription — ${patient.name}`} onClose={onClose} wide>
+        <div className="space-y-4">
+          <Textarea label="Chief Complaint *" value={form.chiefComplaint} onChange={e => set('chiefComplaint', e.target.value)} />
+          <Textarea label="Diagnosis *" value={form.diagnosis} onChange={e => set('diagnosis', e.target.value)} />
+          <Textarea label="Treatment Advice / Notes" value={form.advice} onChange={e => set('advice', e.target.value)} />
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-semibold text-gray-600">Medicines</label>
+              <Btn size="sm" variant="secondary" onClick={addMed}>+ Add Row</Btn>
+            </div>
+            <div className="space-y-2">
+              {form.medicines.map((m, i) => (
+                <div key={i} className="grid grid-cols-4 gap-2 items-end">
+                  <Input label={i === 0 ? 'Medicine Name' : ''} value={m.name} onChange={e => updateMed(i,'name',e.target.value)} placeholder="Medicine" />
+                  <Input label={i === 0 ? 'Dosage' : ''} value={m.dosage} onChange={e => updateMed(i,'dosage',e.target.value)} placeholder="e.g. 500mg" />
+                  <Input label={i === 0 ? 'Timing' : ''} value={m.timing} onChange={e => updateMed(i,'timing',e.target.value)} placeholder="e.g. 1-0-1" />
+                  <div className="flex gap-1">
+                    <Input label={i === 0 ? 'Duration' : ''} value={m.duration} onChange={e => updateMed(i,'duration',e.target.value)} placeholder="e.g. 5 days" />
+                    {form.medicines.length > 1 && (
+                      <button onClick={() => removeMed(i)} className="text-red-400 hover:text-red-600 mt-auto mb-0.5 px-1">✕</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-blue-50 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-blue-700">Internal Routing</p>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={form.sendToLab} onChange={e => set('sendToLab', e.target.checked)} className="rounded" />
+                Send to Lab
+              </label>
+              {form.sendToLab && (
+                <Select value={form.labTest} onChange={e => set('labTest', e.target.value)}
+                  options={Object.entries(LAB_TEMPLATES).map(([k,v]) => ({ value: k, label: v.name }))} />
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" onClick={save}>Save Prescription</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Rx Print Modal
+  function RxPrintModal({ rx, patient, onClose }) {
+    const [settings, setSettings] = React.useState({});
+    const [signatories, setSignatories] = React.useState([]);
+    const [selectedSig, setSelectedSig] = React.useState('');
+    const [letterhead, setLetterhead] = React.useState(false);
+
+    React.useEffect(() => {
+      db.settings.get('clinic').then(s => s && setSettings(s.value || {}));
+      db.signatories.toArray().then(sigs => { setSignatories(sigs); if (sigs.length > 0) setSelectedSig(sigs[0].id); });
+    }, []);
+
+    const sig = signatories.find(s => s.id == selectedSig);
+
+    const printRx = () => {
+      const html = `
+        <div>
+          ${!letterhead ? `<div class="digital-header" style="border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px;">
+            <h1 style="font-size:20pt;color:#1e40af;margin:0;">${settings.clinicName || 'PolyCare Polyclinic'}</h1>
+            <p style="margin:2px 0;font-size:10pt;">${settings.address || ''}</p>
+            <p style="margin:2px 0;font-size:10pt;">Phone: ${settings.phone || ''}</p>
+          </div>` : '<div style="height:40mm;"></div>'}
+          <h2 style="font-size:14pt;margin-bottom:8px;">PRESCRIPTION</h2>
+          <table style="width:100%;margin-bottom:12px;">
+            <tr><td><b>Patient:</b> ${patient?.name}</td><td><b>Age/Sex:</b> ${patient?.age}y / ${patient?.gender}</td></tr>
+            <tr><td><b>Phone:</b> ${patient?.phone}</td><td><b>Date:</b> ${fmtDate(rx.createdAt)}</td></tr>
+          </table>
+          <p><b>Chief Complaint:</b> ${rx.chiefComplaint}</p>
+          <p><b>Diagnosis:</b> ${rx.diagnosis}</p>
+          ${rx.advice ? `<p><b>Advice:</b> ${rx.advice}</p>` : ''}
+          <h3 style="margin-top:12px;">Rx</h3>
+          <table>
+            <tr><th>Medicine</th><th>Dosage</th><th>Timing</th><th>Duration</th></tr>
+            ${(rx.medicines || []).map(m => `<tr><td>${m.name}</td><td>${m.dosage}</td><td>${m.timing}</td><td>${m.duration}</td></tr>`).join('')}
+          </table>
+          ${sig ? `<div style="margin-top:40px;text-align:right;border-top:1px solid #ccc;padding-top:8px;">
+            <p style="margin:0;font-weight:bold;">${sig.name}</p>
+            <p style="margin:0;font-size:9pt;">${sig.qualifications}</p>
+            <p style="margin:0;font-size:9pt;">Reg. No: ${sig.licenseNo}</p>
+          </div>` : ''}
+        </div>`;
+      triggerPrint(html, letterhead);
+    };
+
+    return (
+      <Modal title="Print Prescription" onClose={onClose}>
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={letterhead} onChange={e => setLetterhead(e.target.checked)} />
+              Use pre-printed letterhead (hide digital header)
+            </label>
+          </div>
+          {signatories.length > 0 && (
+            <Select label="Signatory" value={selectedSig} onChange={e => setSelectedSig(e.target.value)}
+              options={signatories.map(s => ({ value: s.id, label: `${s.name} (${s.qualifications})` }))} />
+          )}
+          <div className="flex justify-end gap-2 mt-4">
+            <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+            <Btn variant="primary" onClick={printRx}>🖨️ Print</Btn>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  // =====================================================================
+  //  PHARMACY MODULE
+  // =====================================================================
+  function PharmacyModule() {
+    const [subTab, setSubTab] = React.useState('pos');
+    const [medicines, setMedicines] = React.useState([]);
+    const [cart, setCart]           = React.useState([]);
+    const [sales, setSales]         = React.useState([]);
+    const [showAddMed, setShowAddMed] = React.useState(false);
+    const [showReceipt, setShowReceipt] = React.useState(null);
+    const [search, setSearch] = React.useState('');
+    const [taxRate, setTaxRate] = React.useState(0);
+
+    React.useEffect(() => {
+      db.medicines.toArray().then(setMedicines);
+      db.sales.toArray().then(setSales);
+    }, []);
+
+    const reload = async () => {
+      setMedicines(await db.medicines.toArray());
+      setSales(await db.sales.toArray());
+    };
+
+    // Barcode scanner for POS
+    const handleScan = React.useCallback((code) => {
+      if (subTab === 'pos') {
+        const med = medicines.find(m => m.barcode === code);
+        if (med) addToCart(med);
+        else alert(`Barcode ${code} not found in inventory.`);
+      } else if (subTab === 'intake') {
+        setScanCode(code);
+      }
+    }, [subTab, medicines]);
+
+    useBarcodeScanner(handleScan);
+
+    const [scanCode, setScanCode] = React.useState('');
+
+    const addToCart = (med) => {
+      if (med.quantity <= 0) { alert('Out of stock!'); return; }
+      setCart(c => {
+        const ex = c.find(i => i.medId === med.id);
+        if (ex) return c.map(i => i.medId === med.id ? { ...i, qty: i.qty + 1 } : i);
+        return [...c, { medId: med.id, name: med.name, price: med.retailPrice, qty: 1, barcode: med.barcode }];
+      });
+    };
+
+    const updateCartQty = (medId, qty) => {
+      if (qty <= 0) { setCart(c => c.filter(i => i.medId !== medId)); return; }
+      setCart(c => c.map(i => i.medId === medId ? { ...i, qty } : i));
+    };
+
+    const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
+    const tax      = subtotal * (taxRate / 100);
+    const total    = subtotal + tax;
+
+    const checkout = async () => {
+      if (cart.length === 0) { alert('Cart is empty.'); return; }
+      // Deduct stock
+      for (const item of cart) {
+        const med = await db.medicines.get(item.medId);
+        if (med) await db.medicines.update(item.medId, { quantity: Math.max(0, med.quantity - item.qty) });
+      }
+      const saleId = await db.sales.add({ items: cart, subtotal, tax, total, taxRate, createdAt: now() });
+      const sale = await db.sales.get(saleId);
+      setCart([]);
+      reload();
+      setShowReceipt(sale);
+    };
+
+    const filteredMeds = medicines.filter(m =>
+      m.name?.toLowerCase().includes(search.toLowerCase()) ||
+      m.barcode?.includes(search)
+    );
+
+    const expiredMeds  = medicines.filter(m => m.expiry && new Date(m.expiry) < new Date());
+    const lowStockMeds = medicines.filter(m => m.quantity <= (m.minStock || 10) && m.quantity > 0);
+    const outOfStock   = medicines.filter(m => m.quantity <= 0);
+
+    const tabs = [
+      { id: 'pos',     label: 'POS Checkout',  icon: '🛒' },
+      { id: 'stock',   label: 'Stock Levels',  icon: '📦' },
+      { id: 'intake',  label: 'Intake',        icon: '➕' },
+      { id: 'history', label: 'Sales History', icon: '📜' },
+    ];
+
+    return (
+      <div className="tab-content">
+        <SectionTabs tabs={tabs} active={subTab} setActive={setSubTab} />
+
+        {/* POS */}
+        {subTab === 'pos' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2">
+              <Card title="Medicine Catalog" action={
+                <input value={search} onChange={e => setSearch(e.target.value)}
+                  placeholder="Search or scan barcode..."
+                  className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 w-56" />
+              }>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-96 overflow-y-auto">
+                  {filteredMeds.map(m => (
+                    <button key={m.id}
+                      onClick={() => addToCart(m)}
+                      disabled={m.quantity <= 0}
+                      className={`text-left p-3 rounded-xl border-2 transition-all ${
+                        m.quantity <= 0
+                          ? 'border-gray-200 bg-gray-50 opacity-50 cursor-not-allowed'
+                          : 'border-gray-200 hover:border-blue-400 hover:bg-blue-50'
+                      }`}>
+                      <p className="font-semibold text-sm truncate">{m.name}</p>
+                      <p className="text-xs text-gray-500 font-mono">{m.barcode}</p>
+                      <div className="flex items-center justify-between mt-1">
+                        <span className="text-green-700 font-bold text-sm">₹{m.retailPrice}</span>
+                        {m.quantity <= 0
+                          ? <Badge color="red">Out</Badge>
+                          : <Badge color={m.quantity <= (m.minStock||10) ? 'yellow' : 'green'}>{m.quantity}</Badge>
+                        }
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </Card>
+            </div>
+
+            <div>
+              <Card title="Cart">
+                <div className="space-y-2 min-h-32 max-h-64 overflow-y-auto mb-3">
+                  {cart.length === 0 && <p className="text-gray-400 text-sm text-center py-6">Cart is empty. Scan or click items.</p>}
+                  {cart.map(item => (
+                    <div key={item.medId} className="flex items-center gap-2 bg-gray-50 rounded-lg p-2">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{item.name}</p>
+                        <p className="text-xs text-gray-500">₹{item.price} each</p>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => updateCartQty(item.medId, item.qty - 1)}
+                          className="w-6 h-6 rounded bg-gray-200 hover:bg-gray-300 text-sm font-bold">−</button>
+                        <span className="w-6 text-center text-sm font-semibold">{item.qty}</span>
+                        <button onClick={() => updateCartQty(item.medId, item.qty + 1)}
+                          className="w-6 h-6 rounded bg-gray-200 hover:bg-gray-300 text-sm font-bold">+</button>
+                      </div>
+                      <span className="text-sm font-bold text-blue-700 w-14 text-right">₹{(item.price * item.qty).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t pt-3 space-y-1">
+                  <div className="flex justify-between text-sm"><span>Subtotal</span><span>₹{subtotal.toFixed(2)}</span></div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span>Tax (%)</span>
+                    <input type="number" value={taxRate} onChange={e => setTaxRate(Number(e.target.value))}
+                      className="w-16 border rounded px-2 py-0.5 text-sm text-right" min="0" max="100" />
+                  </div>
+                  {taxRate > 0 && <div className="flex justify-between text-sm text-gray-500"><span>Tax Amount</span><span>₹{tax.toFixed(2)}</span></div>}
+                  <div className="flex justify-between font-bold text-base border-t pt-1 mt-1">
+                    <span>Total</span><span className="text-green-700">₹{total.toFixed(2)}</span>
+                  </div>
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <Btn variant="secondary" className="flex-1" onClick={() => setCart([])}>Clear</Btn>
+                  <Btn variant="success" className="flex-1" onClick={checkout}>Checkout</Btn>
+                </div>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {/* STOCK */}
+        {subTab === 'stock' && (
+          <div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <StatCard label="Expired" value={expiredMeds.length} icon="⚠️" color="orange" />
+              <StatCard label="Low Stock" value={lowStockMeds.length} icon="📉" color="purple" />
+              <StatCard label="Out of Stock" value={outOfStock.length} icon="🚫" color="blue" />
+            </div>
+            {expiredMeds.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4">
+                <p className="text-red-700 font-semibold text-sm mb-1">⚠️ Expired Medicines</p>
+                <div className="flex flex-wrap gap-2">
+                  {expiredMeds.map(m => <Badge key={m.id} color="red">{m.name} (Exp: {m.expiry})</Badge>)}
+                </div>
+              </div>
+            )}
+            <div className="flex justify-between items-center mb-3">
+              <input value={search} onChange={e => setSearch(e.target.value)}
+                placeholder="Search medicines..."
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 w-64" />
+              <Btn variant="primary" onClick={() => setShowAddMed(true)}>+ Add Medicine</Btn>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">Name</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Barcode</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Batch</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Expiry</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Rack</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Cost</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Retail</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Qty</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredMeds.length === 0 && (
+                    <tr><td colSpan={9} className="text-center py-8 text-gray-400">No medicines found.</td></tr>
+                  )}
+                  {filteredMeds.map(m => {
+                    const isExp = m.expiry && new Date(m.expiry) < new Date();
+                    const isLow = m.quantity <= (m.minStock || 10) && m.quantity > 0;
+                    const isOut = m.quantity <= 0;
+                    return (
+                      <tr key={m.id} className={`border-t border-gray-100 hover:bg-gray-50 ${isExp ? 'bg-red-50' : isOut ? 'bg-orange-50' : isLow ? 'bg-yellow-50' : ''}`}>
+                        <td className="px-3 py-2 font-medium">{m.name}</td>
+                        <td className="px-3 py-2 font-mono text-xs">{m.barcode}</td>
+                        <td className="px-3 py-2">{m.batch}</td>
+                        <td className={`px-3 py-2 ${isExp ? 'text-red-600 font-bold' : ''}`}>{m.expiry}</td>
+                        <td className="px-3 py-2">{m.rackPosition}</td>
+                        <td className="px-3 py-2">₹{m.costPrice}</td>
+                        <td className="px-3 py-2">₹{m.retailPrice}</td>
+                        <td className="px-3 py-2 font-bold">{m.quantity}</td>
+                        <td className="px-3 py-2">
+                          {isExp ? <Badge color="red">Expired</Badge>
+                            : isOut ? <Badge color="orange">Out of Stock</Badge>
+                            : isLow ? <Badge color="yellow">Low Stock</Badge>
+                            : <Badge color="green">OK</Badge>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* INTAKE */}
+        {subTab === 'intake' && (
+          <MedicineIntakeForm
+            scanCode={scanCode}
+            onSave={reload}
+            medicines={medicines}
+          />
+        )}
+
+        {/* SALES HISTORY */}
+        {subTab === 'history' && (
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">Sale ID</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Items</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Subtotal</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Total</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Date</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Receipt</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sales.length === 0 && (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">No sales yet.</td></tr>
+                  )}
+                  {[...sales].reverse().map(s => (
+                    <tr key={s.id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono text-xs">S{String(s.id).padStart(5,'0')}</td>
+                      <td className="px-3 py-2">{s.items?.length} item(s)</td>
+                      <td className="px-3 py-2">₹{s.subtotal?.toFixed(2)}</td>
+                      <td className="px-3 py-2">₹{s.tax?.toFixed(2)}</td>
+                      <td className="px-3 py-2 font-bold text-green-700">₹{s.total?.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-gray-500">{fmtDateTime(s.createdAt)}</td>
+                      <td className="px-3 py-2">
+                        <Btn size="sm" variant="secondary" onClick={() => setShowReceipt(s)}>Print</Btn>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {showAddMed && <AddMedicineModal onClose={() => setShowAddMed(false)} onSave={reload} />}
+        {showReceipt && <ReceiptModal sale={showReceipt} onClose={() => setShowReceipt(null)} />}
+      </div>
+    );
+  }
+
+  function MedicineIntakeForm({ scanCode, onSave, medicines }) {
+    const [form, setForm] = React.useState({
+      name:'', barcode:'', batch:'', expiry:'', rackPosition:'',
+      costPrice:'', retailPrice:'', quantity:'', minStock:'10',
+    });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    React.useEffect(() => {
+      if (scanCode) {
+        const med = medicines.find(m => m.barcode === scanCode);
+        if (med) {
+          setForm(f => ({ ...f, barcode: scanCode, name: med.name }));
+        } else {
+          setForm(f => ({ ...f, barcode: scanCode }));
+        }
+      }
+    }, [scanCode]);
+
+    const save = async () => {
+      if (!form.name || !form.barcode) { alert('Name and barcode are required.'); return; }
+      const existing = medicines.find(m => m.barcode === form.barcode);
+      if (existing) {
+        await db.medicines.update(existing.id, {
+          batch: form.batch, expiry: form.expiry,
+          quantity: existing.quantity + Number(form.quantity),
+          costPrice: Number(form.costPrice) || existing.costPrice,
+          retailPrice: Number(form.retailPrice) || existing.retailPrice,
+        });
+      } else {
+        await db.medicines.add({
+          ...form,
+          costPrice: Number(form.costPrice),
+          retailPrice: Number(form.retailPrice),
+          quantity: Number(form.quantity),
+          minStock: Number(form.minStock),
+        });
+      }
+      setForm({ name:'', barcode:'', batch:'', expiry:'', rackPosition:'', costPrice:'', retailPrice:'', quantity:'', minStock:'10' });
+      onSave();
+      alert('Medicine saved successfully!');
+    };
+
+    return (
+      <Card title="Medicine Intake / Restock">
+        <p className="text-xs text-blue-600 mb-4">💡 Scan a barcode to auto-fill the barcode field. If the medicine exists, quantity will be added to current stock.</p>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2 md:col-span-1">
+            <Input label="Barcode ID *" value={form.barcode} onChange={e => set('barcode', e.target.value)} placeholder="Scan or type barcode" />
+          </div>
+          <div className="col-span-2 md:col-span-1">
+            <Input label="Medicine Name *" value={form.name} onChange={e => set('name', e.target.value)} />
+          </div>
+          <Input label="Batch Number" value={form.batch} onChange={e => set('batch', e.target.value)} />
+          <Input label="Expiry Date" type="date" value={form.expiry} onChange={e => set('expiry', e.target.value)} />
+          <Input label="Rack Position" value={form.rackPosition} onChange={e => set('rackPosition', e.target.value)} />
+          <Input label="Min Stock Alert" type="number" value={form.minStock} onChange={e => set('minStock', e.target.value)} />
+          <Input label="Cost Price (₹)" type="number" value={form.costPrice} onChange={e => set('costPrice', e.target.value)} />
+          <Input label="Retail Price (₹)" type="number" value={form.retailPrice} onChange={e => set('retailPrice', e.target.value)} />
+          <div className="col-span-2">
+            <Input label="Quantity to Add *" type="number" value={form.quantity} onChange={e => set('quantity', e.target.value)} />
+          </div>
+        </div>
+        <div className="flex justify-end mt-4">
+          <Btn variant="success" onClick={save}>Save to Inventory</Btn>
+        </div>
+      </Card>
+    );
+  }
+
+  function AddMedicineModal({ onClose, onSave }) {
+    const [form, setForm] = React.useState({
+      name:'', barcode:'', batch:'', expiry:'', rackPosition:'',
+      costPrice:'', retailPrice:'', quantity:'', minStock:'10',
+    });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const save = async () => {
+      if (!form.name || !form.barcode) { alert('Name and barcode are required.'); return; }
+      await db.medicines.add({
+        ...form,
+        costPrice: Number(form.costPrice),
+        retailPrice: Number(form.retailPrice),
+        quantity: Number(form.quantity),
+        minStock: Number(form.minStock),
+      });
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title="Add New Medicine" onClose={onClose}>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2"><Input label="Medicine Name *" value={form.name} onChange={e => set('name', e.target.value)} /></div>
+          <Input label="Barcode ID *" value={form.barcode} onChange={e => set('barcode', e.target.value)} />
+          <Input label="Batch Number" value={form.batch} onChange={e => set('batch', e.target.value)} />
+          <Input label="Expiry Date" type="date" value={form.expiry} onChange={e => set('expiry', e.target.value)} />
+          <Input label="Rack Position" value={form.rackPosition} onChange={e => set('rackPosition', e.target.value)} />
+          <Input label="Cost Price (₹)" type="number" value={form.costPrice} onChange={e => set('costPrice', e.target.value)} />
+          <Input label="Retail Price (₹)" type="number" value={form.retailPrice} onChange={e => set('retailPrice', e.target.value)} />
+          <Input label="Quantity" type="number" value={form.quantity} onChange={e => set('quantity', e.target.value)} />
+          <Input label="Min Stock Alert" type="number" value={form.minStock} onChange={e => set('minStock', e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" onClick={save}>Add Medicine</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  function ReceiptModal({ sale, onClose }) {
+    const [settings, setSettings] = React.useState({});
+    React.useEffect(() => { db.settings.get('clinic').then(s => s && setSettings(s.value || {})); }, []);
+
+    const printReceipt = () => {
+      const html = `
+        <div style="max-width:300px;margin:auto;font-family:monospace;">
+          <div style="text-align:center;border-bottom:1px dashed #ccc;padding-bottom:8px;margin-bottom:8px;">
+            <h2 style="margin:0;">${settings.clinicName || 'PolyCare'}</h2>
+            <p style="margin:2px 0;font-size:9pt;">${settings.address || ''}</p>
+            <p style="margin:2px 0;font-size:9pt;">PHARMACY RECEIPT</p>
+          </div>
+          <p style="font-size:9pt;">Receipt #: S${String(sale.id).padStart(5,'0')}</p>
+          <p style="font-size:9pt;">Date: ${fmtDateTime(sale.createdAt)}</p>
+          <table style="width:100%;font-size:9pt;margin:8px 0;">
+            <tr><th style="text-align:left;">Item</th><th>Qty</th><th style="text-align:right;">Amt</th></tr>
+            ${(sale.items||[]).map(i => `<tr><td>${i.name}</td><td style="text-align:center;">${i.qty}</td><td style="text-align:right;">₹${(i.price*i.qty).toFixed(2)}</td></tr>`).join('')}
+          </table>
+          <div style="border-top:1px dashed #ccc;padding-top:6px;font-size:9pt;">
+            <div style="display:flex;justify-content:space-between;"><span>Subtotal</span><span>₹${sale.subtotal?.toFixed(2)}</span></div>
+            ${sale.taxRate > 0 ? `<div style="display:flex;justify-content:space-between;"><span>Tax (${sale.taxRate}%)</span><span>₹${sale.tax?.toFixed(2)}</span></div>` : ''}
+            <div style="display:flex;justify-content:space-between;font-weight:bold;font-size:11pt;"><span>TOTAL</span><span>₹${sale.total?.toFixed(2)}</span></div>
+          </div>
+          <p style="text-align:center;font-size:8pt;margin-top:12px;">Thank you for visiting!</p>
+        </div>`;
+      triggerPrint(html);
+    };
+
+    return (
+      <Modal title="Receipt Preview" onClose={onClose}>
+        <div className="font-mono text-sm space-y-1">
+          <p className="font-bold text-center">{settings.clinicName || 'PolyCare'}</p>
+          <p className="text-center text-xs text-gray-500">PHARMACY RECEIPT</p>
+          <p className="text-xs">Receipt #: S{String(sale.id).padStart(5,'0')}</p>
+          <p className="text-xs">Date: {fmtDateTime(sale.createdAt)}</p>
+          <div className="border-t border-dashed my-2" />
+          {(sale.items||[]).map((i,idx) => (
+            <div key={idx} className="flex justify-between text-xs">
+              <span>{i.name} x{i.qty}</span>
+              <span>₹{(i.price*i.qty).toFixed(2)}</span>
+            </div>
+          ))}
+          <div className="border-t border-dashed my-2" />
+          <div className="flex justify-between text-xs"><span>Subtotal</span><span>₹{sale.subtotal?.toFixed(2)}</span></div>
+          {sale.taxRate > 0 && <div className="flex justify-between text-xs"><span>Tax ({sale.taxRate}%)</span><span>₹{sale.tax?.toFixed(2)}</span></div>}
+          <div className="flex justify-between font-bold"><span>Total</span><span className="text-green-700">₹{sale.total?.toFixed(2)}</span></div>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Close</Btn>
+          <Btn variant="primary" onClick={printReceipt}>🖨️ Print</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // =====================================================================
+  //  LAB MODULE
+  // =====================================================================
+  function LabModule() {
+    const [subTab, setSubTab] = React.useState('worklist');
+    const [labOrders, setLabOrders]   = React.useState([]);
+    const [labResults, setLabResults] = React.useState([]);
+    const [patients, setPatients]     = React.useState([]);
+    const [showOrderForm, setShowOrderForm] = React.useState(false);
+    const [showResultForm, setShowResultForm] = React.useState(null);
+    const [showReport, setShowReport]         = React.useState(null);
+    const [showBarcodeLabel, setShowBarcodeLabel] = React.useState(null);
+
+    React.useEffect(() => {
+      db.labOrders.toArray().then(setLabOrders);
+      db.labResults.toArray().then(setLabResults);
+      db.patients.toArray().then(setPatients);
+    }, []);
+
+    const reload = async () => {
+      setLabOrders(await db.labOrders.toArray());
+      setLabResults(await db.labResults.toArray());
+      setPatients(await db.patients.toArray());
+    };
+
+    // Barcode scanner for lab
+    const handleScan = React.useCallback((code) => {
+      const order = labOrders.find(o => o.barcode === code);
+      if (order) {
+        if (order.status === 'pending') {
+          db.labOrders.update(order.id, { status: 'in-lab' }).then(reload);
+          alert(`Sample received for order ${order.barcode}. Status: In Lab.`);
+        } else if (order.status === 'in-lab') {
+          setShowResultForm(order);
+        }
+      } else {
+        alert(`No lab order found for barcode: ${code}`);
+      }
+    }, [labOrders]);
+
+    useBarcodeScanner(handleScan);
+
+    const patientName = (pid) => patients.find(p => p.id === pid)?.name || 'Unknown';
+    const patientInfo = (pid) => patients.find(p => p.id === pid);
+    const getResult   = (orderId) => labResults.find(r => r.labOrderId === orderId);
+
+    const statusColor = { pending: 'yellow', 'in-lab': 'blue', completed: 'green' };
+
+    const tabs = [
+      { id: 'worklist',  label: 'Worklist',      icon: '📋' },
+      { id: 'templates', label: 'Test Templates', icon: '🧪' },
+      { id: 'results',   label: 'Results',        icon: '📊' },
+    ];
+
+    return (
+      <div className="tab-content">
+        <SectionTabs tabs={tabs} active={subTab} setActive={setSubTab} />
+
+        {/* WORKLIST */}
+        {subTab === 'worklist' && (
+          <div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <StatCard label="Pending Collection" value={labOrders.filter(o=>o.status==='pending').length} icon="⏳" color="orange" />
+              <StatCard label="In Lab" value={labOrders.filter(o=>o.status==='in-lab').length} icon="🔬" color="blue" />
+              <StatCard label="Completed" value={labOrders.filter(o=>o.status==='completed').length} icon="✅" color="green" />
+            </div>
+            <div className="flex justify-between items-center mb-3">
+              <p className="text-sm text-blue-600">💡 Scan a printed barcode label to update sample status instantly.</p>
+              <Btn variant="primary" onClick={() => setShowOrderForm(true)}>+ New Lab Order</Btn>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">Barcode</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Patient</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Test</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Status</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Ordered</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {labOrders.length === 0 && (
+                    <tr><td colSpan={6} className="text-center py-8 text-gray-400">No lab orders.</td></tr>
+                  )}
+                  {[...labOrders].reverse().map(o => (
+                    <tr key={o.id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono text-xs">{o.barcode}</td>
+                      <td className="px-3 py-2 font-medium">{patientName(o.patientId)}</td>
+                      <td className="px-3 py-2">{LAB_TEMPLATES[o.testType]?.name || o.testType}</td>
+                      <td className="px-3 py-2"><Badge color={statusColor[o.status]}>{o.status}</Badge></td>
+                      <td className="px-3 py-2 text-gray-500">{fmtDateTime(o.createdAt)}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex gap-1 flex-wrap">
+                          <Btn size="sm" variant="secondary" onClick={() => setShowBarcodeLabel(o)}>Label</Btn>
+                          {o.status === 'pending' && (
+                            <Btn size="sm" variant="warning" onClick={() => { db.labOrders.update(o.id, { status: 'in-lab' }).then(reload); }}>Collect</Btn>
+                          )}
+                          {o.status === 'in-lab' && (
+                            <Btn size="sm" variant="primary" onClick={() => setShowResultForm(o)}>Enter Results</Btn>
+                          )}
+                          {o.status === 'completed' && (
+                            <Btn size="sm" variant="success" onClick={() => setShowReport({ order: o, result: getResult(o.id), patient: patientInfo(o.patientId) })}>Report</Btn>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TEMPLATES */}
+        {subTab === 'templates' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {Object.entries(LAB_TEMPLATES).map(([key, tmpl]) => (
+              <Card key={key} title={tmpl.name}>
+                <div className="space-y-1">
+                  {tmpl.parameters.map(p => (
+                    <div key={p.id} className="flex items-center justify-between text-sm py-1 border-b border-gray-50">
+                      <span className="font-medium">{p.label}</span>
+                      <div className="text-right">
+                        {p.unit && <span className="text-xs text-gray-500 mr-2">{p.unit}</span>}
+                        <span className="text-xs text-blue-600">{p.refText}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+
+        {/* RESULTS */}
+        {subTab === 'results' && (
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-left">
+                    <th className="px-3 py-2 font-semibold text-gray-600">Patient</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Test</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Reported</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600">Report</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {labResults.length === 0 && (
+                    <tr><td colSpan={4} className="text-center py-8 text-gray-400">No results yet.</td></tr>
+                  )}
+                  {[...labResults].reverse().map(r => {
+                    const order = labOrders.find(o => o.id === r.labOrderId);
+                    return (
+                      <tr key={r.id} className="border-t border-gray-100 hover:bg-gray-50">
+                        <td className="px-3 py-2 font-medium">{patientName(order?.patientId)}</td>
+                        <td className="px-3 py-2">{LAB_TEMPLATES[order?.testType]?.name || order?.testType}</td>
+                        <td className="px-3 py-2 text-gray-500">{fmtDateTime(r.createdAt)}</td>
+                        <td className="px-3 py-2">
+                          <Btn size="sm" variant="success" onClick={() => setShowReport({ order, result: r, patient: patientInfo(order?.patientId) })}>
+                            View Report
+                          </Btn>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {showOrderForm && <LabOrderForm patients={patients} onClose={() => setShowOrderForm(false)} onSave={reload} />}
+        {showResultForm && <LabResultForm order={showResultForm} onClose={() => setShowResultForm(null)} onSave={reload} />}
+        {showReport && <LabReportModal {...showReport} onClose={() => setShowReport(null)} />}
+        {showBarcodeLabel && <BarcodeLabelModal order={showBarcodeLabel} patient={patientInfo(showBarcodeLabel.patientId)} onClose={() => setShowBarcodeLabel(null)} />}
+      </div>
+    );
+  }
+
+  function LabOrderForm({ patients, onClose, onSave }) {
+    const [form, setForm] = React.useState({ patientId: '', testType: 'CBC' });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const save = async () => {
+      if (!form.patientId) { alert('Please select a patient.'); return; }
+      const barcode = 'LAB' + genId();
+      await db.labOrders.add({ ...form, patientId: Number(form.patientId), barcode, status: 'pending', createdAt: now() });
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title="New Lab Order" onClose={onClose}>
+        <div className="space-y-4">
+          <Select label="Patient *" value={form.patientId} onChange={e => set('patientId', e.target.value)}
+            options={[{ value:'', label:'-- Select Patient --' }, ...patients.map(p => ({ value: p.id, label: `${p.name} (${p.age}y)` }))]} />
+          <Select label="Test Type *" value={form.testType} onChange={e => set('testType', e.target.value)}
+            options={Object.entries(LAB_TEMPLATES).map(([k,v]) => ({ value: k, label: v.name }))} />
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" onClick={save}>Create Order</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  function LabResultForm({ order, onClose, onSave }) {
+    const tmpl = LAB_TEMPLATES[order.testType];
+    const [values, setValues] = React.useState(() => {
+      const init = {};
+      tmpl?.parameters.forEach(p => { init[p.id] = ''; });
+      return init;
+    });
+    const [remarks, setRemarks] = React.useState('');
+
+    const save = async () => {
+      await db.labResults.add({ labOrderId: order.id, values, remarks, createdAt: now() });
+      await db.labOrders.update(order.id, { status: 'completed' });
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title={`Enter Results — ${tmpl?.name}`} onClose={onClose} wide>
+        <div className="space-y-3">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50">
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Parameter</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Reference Range</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Unit</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Result</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Flag</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tmpl?.parameters.map(p => {
+                const oor = isOutOfRange(p, values[p.id]);
+                return (
+                  <tr key={p.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2 font-medium">{p.label}</td>
+                    <td className="px-3 py-2 text-xs text-blue-600">{p.refText}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{p.unit}</td>
+                    <td className="px-3 py-2">
+                      <input
+                        value={values[p.id]}
+                        onChange={e => setValues(v => ({ ...v, [p.id]: e.target.value }))}
+                        className={`border rounded px-2 py-1 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-blue-400 ${oor ? 'border-red-400 text-red-600 font-bold' : 'border-gray-300'}`}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      {oor && <Badge color="red">⚠ Abnormal</Badge>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <Textarea label="Remarks / Notes" value={remarks} onChange={e => setRemarks(e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="success" onClick={save}>Save & Complete</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  function LabReportModal({ order, result, patient, onClose }) {
+    const [settings, setSettings] = React.useState({});
+    const [signatories, setSignatories] = React.useState([]);
+    const [selectedSig, setSelectedSig] = React.useState('');
+    const [letterhead, setLetterhead] = React.useState(false);
+    const tmpl = LAB_TEMPLATES[order?.testType];
+
+    React.useEffect(() => {
+      db.settings.get('clinic').then(s => s && setSettings(s.value || {}));
+      db.signatories.toArray().then(sigs => { setSignatories(sigs); if (sigs.length > 0) setSelectedSig(sigs[0].id); });
+    }, []);
+
+    const sig = signatories.find(s => s.id == selectedSig);
+
+    const printReport = () => {
+      const rows = tmpl?.parameters.map(p => {
+        const val = result?.values?.[p.id] || '';
+        const oor = isOutOfRange(p, val);
+        return `<tr>
+          <td>${p.label}</td>
+          <td style="${oor ? 'color:red;font-weight:bold;' : ''}">${val}</td>
+          <td>${p.unit || ''}</td>
+          <td>${p.refText}</td>
+          <td>${oor ? '<b style="color:red;">H/L</b>' : 'Normal'}</td>
+        </tr>`;
+      }).join('');
+
+      const html = `
+        <div>
+          ${!letterhead ? `<div class="digital-header" style="border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px;">
+            <h1 style="font-size:20pt;color:#1e40af;margin:0;">${settings.clinicName || 'PolyCare Polyclinic'}</h1>
+            <p style="margin:2px 0;">${settings.address || ''}</p>
+            <p style="margin:2px 0;">Phone: ${settings.phone || ''}</p>
+          </div>` : '<div style="height:40mm;"></div>'}
+          <h2 style="text-align:center;font-size:14pt;margin-bottom:12px;">LABORATORY REPORT</h2>
+          <table style="width:100%;margin-bottom:12px;border:none;">
+            <tr><td><b>Patient:</b> ${patient?.name}</td><td><b>Age/Sex:</b> ${patient?.age}y / ${patient?.gender}</td></tr>
+            <tr><td><b>Phone:</b> ${patient?.phone}</td><td><b>Report Date:</b> ${fmtDate(result?.createdAt)}</td></tr>
+            <tr><td><b>Test:</b> ${tmpl?.name}</td><td><b>Order Barcode:</b> ${order?.barcode}</td></tr>
+          </table>
+          <table>
+            <thead><tr style="background:#f1f5f9;">
+              <th>Parameter</th><th>Result</th><th>Unit</th><th>Reference Range</th><th>Flag</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          ${result?.remarks ? `<p style="margin-top:12px;"><b>Remarks:</b> ${result.remarks}</p>` : ''}
+          ${sig ? `<div style="margin-top:40px;text-align:right;border-top:1px solid #ccc;padding-top:8px;">
+            <p style="margin:0;font-weight:bold;">${sig.name}</p>
+            <p style="margin:0;font-size:9pt;">${sig.qualifications}</p>
+            <p style="margin:0;font-size:9pt;">Reg. No: ${sig.licenseNo}</p>
+          </div>` : ''}
+        </div>`;
+      triggerPrint(html, letterhead);
+    };
+
+    return (
+      <Modal title="Lab Report" onClose={onClose} wide>
+        <div className="mb-4 bg-gray-50 rounded-xl p-4">
+          <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+            <div><span className="font-semibold">Patient:</span> {patient?.name}</div>
+            <div><span className="font-semibold">Age/Sex:</span> {patient?.age}y / {patient?.gender}</div>
+            <div><span className="font-semibold">Test:</span> {tmpl?.name}</div>
+            <div><span className="font-semibold">Date:</span> {fmtDate(result?.createdAt)}</div>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-white">
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Parameter</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Result</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Unit</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Reference</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Flag</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tmpl?.parameters.map(p => {
+                const val = result?.values?.[p.id] || '';
+                const oor = isOutOfRange(p, val);
+                return (
+                  <tr key={p.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2">{p.label}</td>
+                    <td className={`px-3 py-2 font-semibold ${oor ? 'text-red-600' : ''}`}>{val}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{p.unit}</td>
+                    <td className="px-3 py-2 text-xs text-blue-600">{p.refText}</td>
+                    <td className="px-3 py-2">{oor ? <Badge color="red">Abnormal</Badge> : <Badge color="green">Normal</Badge>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {result?.remarks && <p className="mt-3 text-sm"><span className="font-semibold">Remarks:</span> {result.remarks}</p>}
+        </div>
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={letterhead} onChange={e => setLetterhead(e.target.checked)} />
+            Use pre-printed letterhead (hide digital header)
+          </label>
+          {signatories.length > 0 && (
+            <Select label="Signatory" value={selectedSig} onChange={e => setSelectedSig(e.target.value)}
+              options={signatories.map(s => ({ value: s.id, label: `${s.name} (${s.qualifications})` }))} />
+          )}
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Close</Btn>
+          <Btn variant="primary" onClick={printReport}>🖨️ Print Report</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  function BarcodeLabelModal({ order, patient, onClose }) {
+    const svgRef = React.useRef(null);
+
+    React.useEffect(() => {
+      if (svgRef.current && order?.barcode) {
+        try {
+          JsBarcode(svgRef.current, order.barcode, {
+            format: 'CODE128', width: 1.5, height: 40,
+            displayValue: true, fontSize: 10, margin: 4,
+          });
+        } catch (e) { console.error(e); }
+      }
+    }, [order]);
+
+    const printLabel = () => {
+      const svgHtml = svgRef.current?.outerHTML || '';
+      const html = `
+        <div style="width:2in;height:1in;display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px solid #ccc;padding:4px;font-family:Arial;font-size:8pt;">
+          <div style="font-weight:bold;font-size:9pt;">${patient?.name}</div>
+          <div>${LAB_TEMPLATES[order?.testType]?.name || order?.testType}</div>
+          ${svgHtml}
+        </div>`;
+      const w = window.open('', '_blank', 'width=300,height=200');
+      w.document.write(`<!DOCTYPE html><html><head><title>Label</title>
+        <style>@page{size:2in 1in;margin:0;}body{margin:0;}</style>
+      </head><body onload="window.print();window.close();">${html}</body></html>`);
+      w.document.close();
+    };
+
+    return (
+      <Modal title="Barcode Label" onClose={onClose}>
+        <div className="flex flex-col items-center gap-3">
+          <div className="border rounded-xl p-4 bg-white shadow-sm text-center">
+            <p className="font-bold text-sm mb-1">{patient?.name}</p>
+            <p className="text-xs text-gray-500 mb-2">{LAB_TEMPLATES[order?.testType]?.name}</p>
+            <svg ref={svgRef}></svg>
+          </div>
+          <p className="text-xs text-gray-500">2×1 inch thermal label format</p>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Close</Btn>
+          <Btn variant="primary" onClick={printLabel}>🖨️ Print Label</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // =====================================================================
+  //  ADMIN / SETTINGS MODULE
+  // =====================================================================
+  function AdminModule() {
+    const [subTab, setSubTab] = React.useState('clinic');
+    const [signatories, setSignatories] = React.useState([]);
+    const [showSigForm, setShowSigForm] = React.useState(false);
+    const [editSig, setEditSig] = React.useState(null);
+    const [clinicSettings, setClinicSettings] = React.useState({
+      clinicName: '', address: '', phone: '', email: '', regNo: '',
+    });
+    const [stats, setStats] = React.useState({});
+
+    React.useEffect(() => {
+      db.signatories.toArray().then(setSignatories);
+      db.settings.get('clinic').then(s => s && setClinicSettings(s.value || {}));
+      Promise.all([
+        db.patients.count(), db.queue.count(), db.medicines.count(),
+        db.labOrders.count(), db.sales.count(), db.prescriptions.count(),
+      ]).then(([p, q, m, l, s, rx]) => setStats({ patients: p, queue: q, medicines: m, lab: l, sales: s, rx }));
+    }, []);
+
+    const reload = async () => {
+      setSignatories(await db.signatories.toArray());
+    };
+
+    const saveClinic = async () => {
+      await db.settings.put({ key: 'clinic', value: clinicSettings });
+      alert('Clinic settings saved!');
+    };
+
+    const deleteSig = async (id) => {
+      if (!confirm('Delete this signatory?')) return;
+      await db.signatories.delete(id);
+      reload();
+    };
+
+    const exportDB = async () => {
+      const data = {
+        exportedAt: now(),
+        patients:      await db.patients.toArray(),
+        vitals:        await db.vitals.toArray(),
+        queue:         await db.queue.toArray(),
+        prescriptions: await db.prescriptions.toArray(),
+        medicines:     await db.medicines.toArray(),
+        sales:         await db.sales.toArray(),
+        labOrders:     await db.labOrders.toArray(),
+        labResults:    await db.labResults.toArray(),
+        signatories:   await db.signatories.toArray(),
+        settings:      await db.settings.toArray(),
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `polycare-backup-${today()}.json`; a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    const importDB = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!confirm('This will REPLACE all current data. Are you sure?')) return;
+      const text = await file.text();
+      const data = JSON.parse(text);
+      await db.transaction('rw',
+        db.patients, db.vitals, db.queue, db.prescriptions,
+        db.medicines, db.sales, db.labOrders, db.labResults,
+        db.signatories, db.settings,
+        async () => {
+          await db.patients.clear();      await db.patients.bulkAdd(data.patients || []);
+          await db.vitals.clear();        await db.vitals.bulkAdd(data.vitals || []);
+          await db.queue.clear();         await db.queue.bulkAdd(data.queue || []);
+          await db.prescriptions.clear(); await db.prescriptions.bulkAdd(data.prescriptions || []);
+          await db.medicines.clear();     await db.medicines.bulkAdd(data.medicines || []);
+          await db.sales.clear();         await db.sales.bulkAdd(data.sales || []);
+          await db.labOrders.clear();     await db.labOrders.bulkAdd(data.labOrders || []);
+          await db.labResults.clear();    await db.labResults.bulkAdd(data.labResults || []);
+          await db.signatories.clear();   await db.signatories.bulkAdd(data.signatories || []);
+          await db.settings.clear();      await db.settings.bulkAdd(data.settings || []);
+        }
+      );
+      alert('Database restored successfully! Please refresh the page.');
+    };
+
+    const tabs = [
+      { id: 'clinic',      label: 'Clinic Info',   icon: '🏥' },
+      { id: 'signatories', label: 'Signatories',   icon: '✍️' },
+      { id: 'database',    label: 'Database',      icon: '💾' },
+      { id: 'overview',    label: 'Overview',      icon: '📊' },
+    ];
+
+    return (
+      <div className="tab-content">
+        <SectionTabs tabs={tabs} active={subTab} setActive={setSubTab} />
+
+        {/* CLINIC INFO */}
+        {subTab === 'clinic' && (
+          <Card title="Clinic Information">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <Input label="Clinic / Hospital Name" value={clinicSettings.clinicName}
+                  onChange={e => setClinicSettings(s => ({ ...s, clinicName: e.target.value }))} />
+              </div>
+              <div className="col-span-2">
+                <Textarea label="Address" value={clinicSettings.address}
+                  onChange={e => setClinicSettings(s => ({ ...s, address: e.target.value }))} />
+              </div>
+              <Input label="Phone" value={clinicSettings.phone}
+                onChange={e => setClinicSettings(s => ({ ...s, phone: e.target.value }))} />
+              <Input label="Email" value={clinicSettings.email}
+                onChange={e => setClinicSettings(s => ({ ...s, email: e.target.value }))} />
+              <Input label="Registration / License No." value={clinicSettings.regNo}
+                onChange={e => setClinicSettings(s => ({ ...s, regNo: e.target.value }))} />
+            </div>
+            <div className="flex justify-end mt-4">
+              <Btn variant="primary" onClick={saveClinic}>Save Settings</Btn>
+            </div>
+          </Card>
+        )}
+
+        {/* SIGNATORIES */}
+        {subTab === 'signatories' && (
+          <div>
+            <div className="flex justify-between items-center mb-4">
+              <p className="text-sm text-gray-600">Manage clinicians whose signatures appear on reports and prescriptions.</p>
+              <Btn variant="primary" onClick={() => { setEditSig(null); setShowSigForm(true); }}>+ Add Signatory</Btn>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {signatories.length === 0 && (
+                <p className="text-gray-400 text-sm col-span-2 text-center py-8">No signatories configured.</p>
+              )}
+              {signatories.map(s => (
+                <Card key={s.id}>
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="font-bold text-gray-800">{s.name}</p>
+                      <p className="text-sm text-blue-600">{s.qualifications}</p>
+                      <p className="text-xs text-gray-500">Reg. No: {s.licenseNo}</p>
+                    </div>
+                    <div className="flex gap-1">
+                      <Btn size="sm" variant="secondary" onClick={() => { setEditSig(s); setShowSigForm(true); }}>Edit</Btn>
+                      <Btn size="sm" variant="danger" onClick={() => deleteSig(s.id)}>Delete</Btn>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* DATABASE */}
+        {subTab === 'database' && (
+          <div className="space-y-4">
+            <Card title="Backup & Restore">
+              <div className="space-y-4">
+                <div className="bg-blue-50 rounded-xl p-4">
+                  <p className="font-semibold text-blue-800 mb-1">Export Database</p>
+                  <p className="text-sm text-blue-600 mb-3">Download a complete JSON backup of all clinic data including patients, medicines, lab orders, and settings.</p>
+                  <Btn variant="primary" onClick={exportDB}>⬇️ Export Backup (.json)</Btn>
+                </div>
+                <div className="bg-orange-50 rounded-xl p-4">
+                  <p className="font-semibold text-orange-800 mb-1">Restore Database</p>
+                  <p className="text-sm text-orange-600 mb-3">⚠️ This will replace ALL current data with the backup file. Ensure you have a fresh backup before proceeding.</p>
+                  <label className="cursor-pointer">
+                    <span className="inline-flex items-center gap-1.5 font-semibold rounded-lg transition-all focus:outline-none px-4 py-2 text-sm bg-orange-500 hover:bg-orange-600 text-white">
+                      ⬆️ Import Backup (.json)
+                    </span>
+                    <input type="file" accept=".json" className="hidden" onChange={importDB} />
+                  </label>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* OVERVIEW */}
+        {subTab === 'overview' && (
+          <div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <StatCard label="Total Patients" value={stats.patients || 0} icon="👥" color="blue" />
+              <StatCard label="Prescriptions" value={stats.rx || 0} icon="📝" color="green" />
+              <StatCard label="Medicines" value={stats.medicines || 0} icon="💊" color="purple" />
+              <StatCard label="Lab Orders" value={stats.lab || 0} icon="🔬" color="orange" />
+              <StatCard label="Sales" value={stats.sales || 0} icon="🛒" color="green" />
+              <StatCard label="Queue Records" value={stats.queue || 0} icon="📋" color="blue" />
+            </div>
+          </div>
+        )}
+
+        {showSigForm && (
+          <SignatoryForm
+            signatory={editSig}
+            onClose={() => setShowSigForm(false)}
+            onSave={reload}
+          />
+        )}
+      </div>
+    );
+  }
+
+  function SignatoryForm({ signatory, onClose, onSave }) {
+    const [form, setForm] = React.useState({
+      name: signatory?.name || '',
+      qualifications: signatory?.qualifications || '',
+      licenseNo: signatory?.licenseNo || '',
+    });
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    const save = async () => {
+      if (!form.name) { alert('Name is required.'); return; }
+      if (signatory?.id) {
+        await db.signatories.update(signatory.id, form);
+      } else {
+        await db.signatories.add(form);
+      }
+      onSave(); onClose();
+    };
+
+    return (
+      <Modal title={signatory ? 'Edit Signatory' : 'Add Signatory'} onClose={onClose}>
+        <div className="space-y-4">
+          <Input label="Full Name *" value={form.name} onChange={e => set('name', e.target.value)} />
+          <Input label="Qualifications (e.g. MD, MBBS)" value={form.qualifications} onChange={e => set('qualifications', e.target.value)} />
+          <Input label="Medical License / Registration Number" value={form.licenseNo} onChange={e => set('licenseNo', e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+          <Btn variant="primary" onClick={save}>{signatory ? 'Update' : 'Add'} Signatory</Btn>
+        </div>
+      </Modal>
+    );
+  }
+
+  // =====================================================================
+  //  MAIN APP
+  // =====================================================================
+  function App() {
+    const [role, setRole]       = React.useState(null);
+    const [activeTab, setActiveTab] = React.useState(null);
+
+    const handleLogin = (selectedRole) => {
+      setRole(selectedRole);
+      // Set default tab per role
+      const defaults = {
+        admin:       'opd',
+        doctor:      'opd',
+        pharmacist:  'pharmacy',
+        pathologist: 'lab',
+      };
+      setActiveTab(defaults[selectedRole]);
+    };
+
+    const handleLogout = () => { setRole(null); setActiveTab(null); };
+
+    if (!role) return <LoginScreen onLogin={handleLogin} />;
+
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <NavBar role={role} activeTab={activeTab} setActiveTab={setActiveTab} onLogout={handleLogout} />
+        <main className="max-w-screen-xl mx-auto px-4 py-6">
+          {activeTab === 'opd'      && <OPDModule />}
+          {activeTab === 'pharmacy' && <PharmacyModule />}
+          {activeTab === 'lab'      && <LabModule />}
+          {activeTab === 'admin'    && <AdminModule />}
+        </main>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  //  RENDER
+  // =====================================================================
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<App />);
+  </script>
+
+  <!-- Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then(reg => console.log('SW registered:', reg.scope))
+          .catch(err => console.log('SW registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
